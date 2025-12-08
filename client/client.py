@@ -8,40 +8,12 @@ import requests
 
 DEFAULT_BASE_URL = os.environ.get("SANDBOX_BASE_URL", "http://localhost:8787")
 
+class Sandbox:
+    """单个 sandbox 的视图，实际请求交由 manager 负责。"""
 
-class SandboxClient:
-    """
-    Lightweight HTTP wrapper around the Sandbox Worker endpoints.
-
-    - All requests must include an explicit sandbox id via `x-sandbox-id`.
-    - `base_url` defaults to the local dev server; override when pointing at
-      a deployed Worker.
-    """
-
-    def __init__(
-        self,
-        *,
-        sandbox_id,
-        base_url: str = DEFAULT_BASE_URL,
-    ):
-        """
-        Create a client tied to a specific sandbox instance.
-
-        Args:
-            sandbox_id: Required identifier for the target sandbox (header
-                `x-sandbox-id` is set on every request).
-            base_url: Worker base URL (e.g. http://localhost:8787 for dev).
-        """
-        if not sandbox_id:
-            raise ValueError("sandbox_id is required (set SANDBOX_ID env var or pass explicitly)")
-
-        self.base_url = base_url.rstrip("/")
+    def __init__(self, sandbox_id: str, manager: "SandboxManager"):
         self.sandbox_id = sandbox_id
-        self.session = requests.Session()
-
-    def _headers(self) -> Dict[str, str]:
-        # Sandbox Worker now requires an explicit sandbox id (no default fallback).
-        return {"x-sandbox-id": self.sandbox_id}
+        self._manager = manager
 
     def _request(
         self,
@@ -52,15 +24,14 @@ class SandboxClient:
         json_body: Optional[Dict[str, Any]] = None,
         stream: bool = False,
     ) -> requests.Response:
-        """Low-level request helper that injects headers and base URL."""
-        url = f"{self.base_url.rstrip('/')}{path}"
-        return self.session.request(
+        """Delegate to manager while注入当前 sandbox id。"""
+        return self._manager._request(
             method,
-            url,
+            path,
             params=params,
-            json=json_body,
+            json_body=json_body,
             stream=stream,
-            headers=self._headers(),
+            sandbox_id=self.sandbox_id,
         )
 
     def write(self, path: str, content: str) -> requests.Response:
@@ -83,45 +54,112 @@ class SandboxClient:
         """Execute a shell command inside the sandbox container."""
         return self._request("POST", "/run", json_body={"command": command})
 
-    def run_test_suite(self, download_path: str = "demo-downloaded.txt") -> None:
-        """Convenience method to exercise typical endpoints for manual testing."""
-        def dump(resp: requests.Response, label: str) -> None:
-            print(f"\n[{label}] {resp.status_code}")
-            try:
-                print(json.dumps(resp.json(), indent=2, ensure_ascii=False))
-            except ValueError:
-                print(resp.text)
-
-        dump(self.write("/workspace/demo.txt", "hello sandbox"), "write")
-        dump(self.read("/workspace/demo.txt"), "read-hit")
-        dump(self.write("/workspace/demo.txt", "v2"), "write-overwrite")
-        dump(self.read("/workspace/demo.txt"), "read-after-overwrite")
-
-        dl_resp = self.download("/workspace/demo.txt")
-        Path(download_path).write_bytes(dl_resp.content)
-        print(f"\n[download] {dl_resp.status_code} saved {download_path} ({len(dl_resp.content)} bytes)")
-
-        dump(self.run("ls -la /workspace"), "run-ls")
-        dump(self.delete("/workspace/demo.txt"), "delete-existing")
-        dump(self.delete("/workspace/demo.txt"), "delete-missing")
-        dump(self.read("/workspace/missing.txt"), "read-missing")
 
 
 
-def test_multiple_sandboxes() -> None:
+class SandboxManager:
+    "管理所有sandbox crud"
+    def __init__(self,base_url: str = DEFAULT_BASE_URL):
+        # 缓存 sandbox_id -> Sandbox 实例，便于复用同一个 handle
+        self._sandboxes: Dict[str, Sandbox] = {}
+        self.base_url = base_url
+        self.session = requests.Session()
+
+
+    def _append_id(self, sandbox_id: str) -> Sandbox:
+        """Ensure a Sandbox instance is cached for the given id and return it."""
+        if sandbox_id not in self._sandboxes:
+            self._sandboxes[sandbox_id] = Sandbox(sandbox_id, self)
+        return self._sandboxes[sandbox_id]
+
+    def _remove_id(self, sandbox_id: str) -> None:
+        """Stop tracking a sandbox id and drop its cached Sandbox handle."""
+        self._sandboxes.pop(sandbox_id, None)
+
+    def _headers(self, sandbox_id: Optional[str] = None) -> Dict[str, str]:
+        if not sandbox_id:
+            return {}
+        return {"x-sandbox-id": sandbox_id}
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Optional[Dict[str, Any]] = None,
+        json_body: Optional[Dict[str, Any]] = None,
+        stream: bool = False,
+        sandbox_id: Optional[str] = None,
+    ) -> requests.Response:
+        """Low-level request helper that injects headers and base URL."""
+        url = f"{self.base_url.rstrip('/')}{path}"
+        return self.session.request(
+            method,
+            url,
+            params=params,
+            json=json_body,
+            stream=stream,
+            headers=self._headers(sandbox_id),
+        )
+
+    def create_sandbox(
+        self, sandbox_id, options: Optional[Dict[str, Any]] = None
+    ) -> requests.Response:
+        """Create (or ensure) a sandbox; returns the id."""
+        resp = self._request("POST", "/sandbox", json_body={"sandboxId": sandbox_id, "options": options})
+        if resp.ok:
+            self._append_id(sandbox_id)
+        return resp
+
+    def destroy_sandbox(self, sandbox_id) -> requests.Response:
+        """Destroy a sandbox by id."""
+        resp = self._request("DELETE", "/sandbox", params={"sandbox_id": sandbox_id}, sandbox_id=sandbox_id)
+        if resp.ok:
+            self._remove_id(sandbox_id)
+        return resp
+
+    def get_sandbox(self, sandbox_id: str, ensure: bool = False, options: Optional[Dict[str, Any]] = None) -> Sandbox:
+        """
+        Return a Sandbox handle bound to `sandbox_id`.
+
+        Set `ensure=True` to call create_sandbox first (idempotent).
+        """
+        if ensure:
+            self.create_sandbox(sandbox_id, options)
+        # 复用已缓存的实例，避免重复创建 handle
+        return self._append_id(sandbox_id)
+
+
+
+
+
+def manager_client2() -> None:
     """
-    IDs are normalized to lowercase to avoid preview URL casing warnings.
-    """
-    sandbox_ids = ["a","b"]
-    if not sandbox_ids:
-        raise ValueError("No sandbox ids provided. Set SANDBOX_IDS or edit defaults.")
+    简单演示 manager + Sandbox 组合用法，便于手工验证接口。
 
-    for sid in sandbox_ids:
-        print(f"\n=== Running suite for sandbox: {sid} ===")
-        client = SandboxClient(sandbox_id=sid)
-        client.run_test_suite()
+    - 创建/确保 sandbox
+    - 写/读/删文件
+    - 销毁 sandbox
+    """
+    manager = SandboxManager()
+    sandbox_id = "demo-client2"
+
+    # 确保容器存在
+    create_resp = manager.create_sandbox(sandbox_id, options={"keepAlive": True})
+    print("create_sandbox", create_resp.status_code, create_resp.text)
+
+    sbx = manager.get_sandbox(sandbox_id)
+    print("write", sbx.write("/workspace/hello.txt", "hi from client2").status_code)
+    print("read", sbx.read("/workspace/hello.txt").status_code, sbx.read("/workspace/hello.txt").text)
+    print("run", sbx.run("ls -la /workspace").status_code)
+    print("delete", sbx.delete("/workspace/hello.txt").status_code)
+
+    destroy_resp = manager.destroy_sandbox(sandbox_id)
+    print("destroy_sandbox", destroy_resp.status_code, destroy_resp.text)
+
+
 
 
 if __name__ == "__main__":
-    test_multiple_sandboxes()
+    manager_client2()
 

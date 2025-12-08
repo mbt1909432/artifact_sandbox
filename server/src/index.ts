@@ -1,15 +1,56 @@
-import { getSandbox, type Sandbox } from '@cloudflare/sandbox';
+import { getSandbox, type Sandbox, type SandboxOptions } from '@cloudflare/sandbox';
+import type { DurableObjectNamespace } from '@cloudflare/workers-types';
 
 export { Sandbox } from '@cloudflare/sandbox';
 
 // Declare Worker bindings to enable TypeScript hints
 type Env = {
-  Sandbox: DurableObjectNamespace<Sandbox>;
+  Sandbox: DurableObjectNamespace;
 };
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+
+    // Sandbox lifecycle management
+    if (url.pathname === '/sandbox') {
+      if (request.method === 'POST') {
+        const body = await safeJson(request);
+        const requestedId = getRequestedId(
+          body?.sandboxId ?? body?.id ?? url.searchParams.get('sandbox_id')
+        );
+        const sandboxId = requestedId ?? crypto.randomUUID();
+        const options = getSandboxOptions(body?.options);
+        const sandbox = getSandbox(env.Sandbox, sandboxId, options);
+
+        return Response.json({
+          sandboxId,
+          created: true,
+          options
+        });
+      }
+
+      if (request.method === 'DELETE') {
+        const body = await safeJson(request);
+        const sandboxId =
+          getRequestedId(body?.sandboxId ?? body?.id) ??
+          getRequestedId(url.searchParams.get('sandbox_id')) ??
+          request.headers.get('x-sandbox-id');
+
+        if (!sandboxId) {
+          return Response.json(
+            { error: 'DELETE /sandbox requires sandbox_id param, id in body, or x-sandbox-id header' },
+            { status: 400 }
+          );
+        }
+
+        const sandbox = getSandbox(env.Sandbox, sandboxId);
+        await sandbox.destroy();
+        return Response.json({ sandboxId, destroyed: true });
+      }
+
+      return Response.json({ error: 'Use POST to create or DELETE to destroy a sandbox.' }, { status: 405 });
+    }
 
     // Pick a Sandbox instance for this request:
     // 1) header x-sandbox-id
@@ -162,6 +203,38 @@ function getRequestedPath(path: unknown): string | null {
 
   const normalized = trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
   return normalized.replace(/\/{2,}/g, '/');
+}
+
+function getRequestedId(id: unknown): string | null {
+  if (typeof id !== 'string') {
+    return null;
+  }
+  const trimmed = id.trim();
+  return trimmed || null;
+}
+
+function getSandboxOptions(options: unknown): SandboxOptions | undefined {
+  if (!options || typeof options !== 'object') {
+    return undefined;
+  }
+
+  const maybeOptions = options as Record<string, unknown>;
+  const result: SandboxOptions = {};
+
+  if (typeof maybeOptions.sleepAfter === 'string') {
+    result.sleepAfter = maybeOptions.sleepAfter;
+  }
+  if (typeof maybeOptions.keepAlive === 'boolean') {
+    result.keepAlive = maybeOptions.keepAlive;
+  }
+  if (typeof maybeOptions.normalizeId === 'boolean') {
+    result.normalizeId = maybeOptions.normalizeId;
+  }
+  if (maybeOptions.containerTimeouts && typeof maybeOptions.containerTimeouts === 'object') {
+    result.containerTimeouts = maybeOptions.containerTimeouts as SandboxOptions['containerTimeouts'];
+  }
+
+  return Object.keys(result).length ? result : undefined;
 }
 
 type SimpleExecResult = {
