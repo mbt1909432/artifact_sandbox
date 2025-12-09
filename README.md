@@ -1,76 +1,89 @@
 # Artifact Sandbox
 
-一个基于 Cloudflare Workers + Sandbox SDK 的最小示例，演示“为每个用户创建独立容器，提供命令执行与文件读写”能力。目录同时包含 Worker 服务端与 Python 轻量客户端。
+Minimal reference for running per-tenant containers on Cloudflare Workers using the Sandbox SDK. The repo ships a Worker backend and a lightweight Python client to exercise the HTTP APIs end to end.
 
-## 设计目的
-- 快速验证 Sandbox SDK 在 Worker 中的接入方式、接口设计与部署流程。
-- 演示多 Sandbox 场景：不同用户/租户可绑定不同的 Sandbox ID，隔离命令执行与文件操作。
-- 方便本地/预发环境用 curl 或简单脚本完成端到端联调。
+## Goals
+- Validate how Sandbox SDK integrates with Workers, including lifecycle, execution, and file APIs.
+- Demonstrate multi-tenant isolation: each user/tenant binds to its own Sandbox ID.
+- Provide simple curl/Python flows for local or pre-prod verification.
 
-## 目录
-- `server/`：Worker 代码、Sandbox 容器定义与部署说明。
-- `client/`：Python 轻量客户端，封装 `/run` 与 `/file` 调用。
+## Repository layout
+- `server/`: Worker code, Dockerfile template, and deployment scripts.
+- `client/`: Python client that wraps `/sandbox`, `/session`, `/run`, and `/file` endpoints.
+- `server/API_DOCUMENTATION.md`: Detailed HTTP API reference.
 
-## 架构示意
+## Current architecture
+- Runtime: Cloudflare Workers (Edge Runtime).
+- State: Durable Objects hold sandbox metadata and session bookkeeping.
+- Containers: Cloudflare Sandbox Docker image (via the bundled Dockerfile template).
+- API: REST over HTTP; Sandbox ID supplied via `x-sandbox-id` header or `sandbox_id` query.
+- Isolation model: each Sandbox ID maps to its own container; sessions inside the container isolate cwd/env.
+
+## Architecture diagram
 ```mermaid
 flowchart LR
-    subgraph U1["docker container for user1"]
-        s1["sandbox1"]
-        s2["sandbox2"]
-        s1 -- spawn --> SXXX["sandbox xxx"]
-        s2 -- spawn --> SXXX
-    end
+    Client["Client (curl / Python)"]
+    Worker["Cloudflare Worker (edge)"]
+    DO["Durable Object (per sandbox)"]
+    Sandbox["Sandbox container (Cloudflare Sandbox SDK)"]
 
-    subgraph U2["docker container for user2"]
-        u2s["sandbox (user2)"]
-        u2s -- spawn --> SXXX
-    end
-
-    AContext["AContext Server（可放 Worker 前/内做鉴权路由）"]
-
-    User["user id + other info"] --> AContext
-    AContext -->|request| Worker["cloudflare worker / local environment"]
-    Worker -->|response| User
-
-    Worker -->|dispatch| U1
-    Worker -->|dispatch| U2
-
-    Worker -->|"npm run dev / deploy"| Config["worker config dir"]
-    Config --> DockerTpl["Dockerfile template（自制副本）"]
-    DockerTpl -->|"sandbox-sdk PR#259"| Config
-
-    style SXXX fill:#f7f7ff,stroke:#333
-    style Worker fill:#eef3ff,stroke:#333
-    style Config fill:#c4d4ff,stroke:#333
-    style DockerTpl fill:#c8a0ff,stroke:#333
+    Client -->|"HTTP REST\n/sandbox /session /run /file"| Worker
+    Worker -->|"route by sandbox_id"| DO
+    DO -->|"create/start/stop via SDK"| Sandbox
+    DO -->|"session + file routing"| Sandbox
+    Sandbox -->|"stdout/stderr + file bytes"| Worker
+    Worker -->|"HTTP response"| Client
 ```
 
-## 服务端用法（概览）
-在 `server/` 目录内按 README 详细步骤操作：
+## Client SDK design
+
+Python 客户端采用三层拆分，便于职责清晰、连接复用、错误集中处理。
+
+- `SandboxManager`：管理所有沙盒 ID，封装底层 HTTP 请求与 `x-sandbox-id` 头部注入，复用 `requests.Session`，并缓存 `Sandbox` 句柄。
+- `Sandbox`：单沙盒门面，持有 `sandbox_id` 和 manager；懒加载默认会话 `_default_session`（ID `"default"`），对外暴露文件/命令/会话等便捷方法。
+- `ExecutionSession`：单会话上下文，向请求自动注入 `sessionId`，提供文件/目录/命令/挂载 bucket 等操作，统一抛出 `SandboxError`。
+
+时序示意（默认会话）：
+```mermaid
+sequenceDiagram
+    participant User as 调用方
+    participant Manager as SandboxManager
+    participant Sandbox as Sandbox
+    participant Session as ExecutionSession
+    participant API as Worker API
+
+    User->>Manager: create_or_get_sandbox(sandboxId)
+    Manager->>API: POST /sandbox (x-sandbox-id)
+    API-->>Manager: 200
+    Manager-->>User: Sandbox 句柄
+
+    User->>Sandbox: run("python3 -c 'print(2+2)'")
+    Sandbox->>Session: _default.run(...)
+    Session->>Session: 注入 {sessionId:"default"}
+    Session->>API: POST /run
+    API-->>Session: 执行结果
+    Session-->>User: {"output":"4", ...}
+```
+
+## Server quickstart
+Run inside `server/`:
 ```bash
 cd artifact_sandbox/server
 npm install
-npm run dev   # 或 wrangler dev
+npm run dev   # or wrangler dev
 ```
-- 首次启动会构建 `Dockerfile` 指定的 Sandbox 容器，并在控制台输出 Sandbox ID。
-- 调用接口时必须在请求头 `x-sandbox-id`（或查询参数 `sandbox_id`）传入该 ID。
-- 主要接口：`POST /run` 执行命令；`PUT/GET/DELETE /file` 写/读/删文件；`GET /file?mode=download` 下载。
-更多细节与 curl 示例见 `server/README.md`。
+- First run builds the Docker image and prints an initial Sandbox ID.
+- Key endpoints: `POST /sandbox` (create/destroy), `POST /session`, `POST /run`, `PUT/GET/DELETE /file`, and `GET /file?mode=download`.
+- See `server/API_DOCUMENTATION.md` for request/response shapes and curl examples.
 
-## 客户端用法（Python）
-位置：`client/client.py`
-
-1) 安装依赖（仅 `requests`）：
+## Python client
+Location: `client/client.py`
 ```bash
 pip install requests
-```
-2) 设置目标：`SANDBOX_BASE_URL`（默认 `http://localhost:8787`）与 `SANDBOX_ID`。
-3) 运行示例测试套件（读写/下载/执行命令）：
-```bash
-export SANDBOX_ID=<你的 Sandbox ID>
+export SANDBOX_ID=<your sandbox id>
 python client/client.py
 ```
-或在代码中直接构造：
+Or construct directly:
 ```python
 from client import client as c
 cli = c.SandboxClient(sandbox_id="<ID>", base_url="http://localhost:8787")
@@ -78,8 +91,8 @@ resp = cli.run("python3 -c \"print(2+2)\"")
 print(resp.json())
 ```
 
-## 典型流程
-1) 本地 `npm run dev` 启动 Worker，获取 Sandbox ID。  
-2) 用 curl / Python 客户端携带 `x-sandbox-id` 调接口。  
-3) 验证命令执行与文件读写，必要时更新 `Dockerfile` 后由 Wrangler 重建 Sandbox 镜像。  
-4) `npm run deploy` 部署到 Cloudflare，客户端只需切换 `base_url` 与 Sandbox ID。
+## Typical flow
+1) Start the Worker locally (`npm run dev`) and note the Sandbox ID.
+2) Call the APIs with `x-sandbox-id` (or `?sandbox_id=`) using curl or the Python client.
+3) Validate command execution and file I/O; adjust the Dockerfile if you need a different toolchain.
+4) Deploy with `npm run deploy`; clients only switch `base_url` and Sandbox ID.
