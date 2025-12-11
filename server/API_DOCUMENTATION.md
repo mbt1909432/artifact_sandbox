@@ -74,6 +74,19 @@ curl -X POST "http://localhost:8787/sandbox" \
   -d '{"sandboxId": "my-sandbox-123"}'
 ```
 
+
+curl -X POST "https://server.435669237.workers.dev" \
+  -H "Content-Type: application/json" \
+  -d '{"sandboxId": "my-sandbox-123"}'
+这个请求不行 {"error":"Missing sandbox id. Provide x-sandbox-id header or ?sandbox_id="}
+
+这个可以
+curl -X POST "https://server.435669237.workers.dev" \
+  -H "Content-Type: application/json" \
+  -H "x-sandbox-id: my-sandbox-123" \
+  -d '{"sandboxId": "my-sandbox-123"}'
+
+
 #### 1.2 销毁 Sandbox
 
 **端点**: `DELETE /sandbox`
@@ -139,6 +152,10 @@ curl -X DELETE "http://localhost:8787/sandbox?sandbox_id=my-sandbox-123"
 curl -X DELETE "http://localhost:8787/sandbox?sandbox_id=non-existent-id"
 # 响应: { "sandboxId": "non-existent-id", "destroyed": true, "existed": false }
 ```
+
+curl -X DELETE "https://server.435669237.workers.dev/sandbox?sandbox_id=my-sandbox-123"
+
+执行删除沙箱两次仍然报ok？？但实际不存在了？？？？
 
 **注意事项**:
 - `destroy()` 方法可以安全地多次调用，即使 Sandbox 已经不存在

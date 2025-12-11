@@ -1,3 +1,4 @@
+import base64
 import logging
 import os
 import uuid
@@ -9,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 
 DEFAULT_BASE_URL = os.environ.get("SANDBOX_BASE_URL", "http://localhost:8787")
-
+# DEFAULT_BASE_URL="https://server.435669237.workers.dev"
 
 class SandboxError(Exception):
     """Exception raised when sandbox operations fail."""
@@ -85,7 +86,7 @@ class ExecutionSession:
 
     def write(self, path: str, content: str) -> None:
         """Write a file in this session's context."""
-        resp = self._request("PUT", "/file", json_body={"path": path, "content": content})
+        resp = self._request("POST", "/files/write", json_body={"path": path, "content": content})
         if not resp.ok:
             error_msg = f"Failed to write file '{path}' in session '{self.session_id}'"
             try:
@@ -100,7 +101,7 @@ class ExecutionSession:
 
     def read(self, path: str) -> str:
         """Read a file in this session's context."""
-        resp = self._request("GET", "/file", params={"path": path})
+        resp = self._request("GET", "/files/read", params={"path": path})
         if not resp.ok:
             error_msg = f"Failed to read file '{path}' in session '{self.session_id}'"
             try:
@@ -112,11 +113,16 @@ class ExecutionSession:
                 status_code=resp.status_code,
                 response_text=error_detail
             )
-        return resp.text
+        result = resp.json()
+        # Server returns {data: {content: ...}, message, code}
+        if isinstance(result, dict) and 'data' in result:
+            return result['data'].get('content', '')
+        return result.get('content', '') if isinstance(result, dict) else resp.text
 
     def download(self, path: str) -> bytes:
         """Download a file in this session's context."""
-        resp = self._request("GET", "/file", params={"path": path, "mode": "download"}, stream=True)
+        # Server doesn't have a separate download endpoint, use read with base64 encoding
+        resp = self._request("GET", "/files/read", params={"path": path, "encoding": "base64"})
         if not resp.ok:
             error_msg = f"Failed to download file '{path}' in session '{self.session_id}'"
             try:
@@ -128,11 +134,17 @@ class ExecutionSession:
                 status_code=resp.status_code,
                 response_text=error_detail
             )
-        return resp.content
+        result = resp.json()
+        # Server returns {data: {content: <base64>}, message, code}
+        if isinstance(result, dict) and 'data' in result:
+            content = result['data'].get('content', '')
+        else:
+            content = result.get('content', '') if isinstance(result, dict) else ''
+        return base64.b64decode(content)
 
     def delete(self, path: str) -> None:
         """Delete a file in this session's context."""
-        resp = self._request("DELETE", "/file", params={"path": path})
+        resp = self._request("DELETE", "/files/delete", params={"path": path})
         if not resp.ok:
             error_msg = f"Failed to delete file '{path}' in session '{self.session_id}'"
             try:
@@ -164,12 +176,14 @@ class ExecutionSession:
                 status_code=resp.status_code,
                 response_text=error_detail
             )
-        return resp.json()
+        result = resp.json()
+        # Server returns {data: {...}, message, code}
+        return result.get('data', result) if isinstance(result, dict) and 'data' in result else result
 
     def mkdir(self, path: str, recursive: bool = False) -> Dict[str, Any]:
         """Create a directory in this session."""
         payload = {"path": path, "recursive": recursive}
-        resp = self._request("POST", "/mkdir", json_body=payload)
+        resp = self._request("POST", "/files/mkdir", json_body=payload)
         if not resp.ok:
             error_msg = f"Failed to create directory '{path}' in session '{self.session_id}'"
             try:
@@ -181,11 +195,13 @@ class ExecutionSession:
                 status_code=resp.status_code,
                 response_text=error_detail
             )
-        return resp.json()
+        result = resp.json()
+        # Server returns {data: {...}, message, code}
+        return result.get('data', result) if isinstance(result, dict) and 'data' in result else result
 
     def exists(self, path: str) -> bool:
         """Check if a file or directory exists in this session."""
-        resp = self._request("GET", "/exists", params={"path": path})
+        resp = self._request("GET", "/files/exists", params={"path": path})
         if not resp.ok:
             error_msg = f"Failed to check existence for '{path}' in session '{self.session_id}'"
             try:
@@ -197,13 +213,16 @@ class ExecutionSession:
                 status_code=resp.status_code,
                 response_text=error_detail
             )
-        data = resp.json()
-        return bool(data.get("exists"))
+        result = resp.json()
+        # Server returns {data: {exists: ...}, message, code}
+        if isinstance(result, dict) and 'data' in result:
+            return bool(result['data'].get("exists", False))
+        return bool(result.get("exists", False))
 
     def rename(self, old_path: str, new_path: str) -> Dict[str, Any]:
         """Rename a file or directory in this session."""
         payload = {"oldPath": old_path, "newPath": new_path}
-        resp = self._request("POST", "/rename", json_body=payload)
+        resp = self._request("POST", "/files/rename", json_body=payload)
         if not resp.ok:
             error_msg = f"Failed to rename '{old_path}' to '{new_path}' in session '{self.session_id}'"
             try:
@@ -215,12 +234,14 @@ class ExecutionSession:
                 status_code=resp.status_code,
                 response_text=error_detail
             )
-        return resp.json()
+        result = resp.json()
+        # Server returns {data: {...}, message, code}
+        return result.get('data', result) if isinstance(result, dict) and 'data' in result else result
 
     def move(self, source_path: str, destination_path: str) -> Dict[str, Any]:
         """Move a file to a different directory in this session."""
-        payload = {"sourcePath": source_path, "destinationPath": destination_path}
-        resp = self._request("POST", "/move", json_body=payload)
+        payload = {"sourcePath": source_path, "destPath": destination_path}
+        resp = self._request("POST", "/files/move", json_body=payload)
         if not resp.ok:
             error_msg = f"Failed to move '{source_path}' to '{destination_path}' in session '{self.session_id}'"
             try:
@@ -232,10 +253,13 @@ class ExecutionSession:
                 status_code=resp.status_code,
                 response_text=error_detail
             )
-        return resp.json()
+        result = resp.json()
+        # Server returns {data: {...}, message, code}
+        return result.get('data', result) if isinstance(result, dict) and 'data' in result else result
 
     def unmount_bucket(self, mount_path: str) -> Dict[str, Any]:
         """Unmount a previously mounted bucket in this session."""
+        # Server accepts mountPath in query params for DELETE
         resp = self._request("DELETE", "/unmount-bucket", params={"mountPath": mount_path})
         if not resp.ok:
             error_msg = f"Failed to unmount bucket at '{mount_path}' in session '{self.session_id}'"
@@ -248,11 +272,14 @@ class ExecutionSession:
                 status_code=resp.status_code,
                 response_text=error_detail
             )
-        return resp.json()
+        result = resp.json()
+        # Server returns {data: {...}, message, code}
+        return result.get('data', result) if isinstance(result, dict) and 'data' in result else result
 
     def run(self, command: str) -> Dict[str, Any]:
         """Execute a command in this session's context."""
-        resp = self._request("POST", "/run", json_body={"command": command})
+        # Use /session/exec for session-based execution
+        resp = self._request("POST", "/session/exec", json_body={"command": command})
         if not resp.ok:
             error_msg = f"Failed to run command '{command}' in session '{self.session_id}'"
             try:
@@ -264,7 +291,11 @@ class ExecutionSession:
                 status_code=resp.status_code,
                 response_text=error_detail
             )
-        return resp.json()
+        result = resp.json()
+        # Server returns {data: {result: {...}}, message, code}
+        if isinstance(result, dict) and 'data' in result:
+            return result['data'].get('result', result['data'])
+        return result.get('result', result)
 
     def run_script(
         self,
@@ -354,13 +385,37 @@ class ExecutionSession:
         
         Args:
             env_vars: Dictionary of environment variable key-value pairs.
+        
+        Raises:
+            SandboxError if the operation fails.
+        
+        Example:
+            session = sandbox.create_session("my-session")
+            session.set_env_vars({
+                "API_KEY": "secret-key",
+                "NODE_ENV": "production"
+            })
         """
-        # Note: This would require a new endpoint or updating the session
-        # For now, we'll raise an error indicating this needs server-side support
-        raise NotImplementedError(
-            "set_env_vars for individual sessions requires server-side support. "
-            "Use sandbox.set_env_vars() to set environment variables for the default session."
-        )
+        if not isinstance(env_vars, dict):
+            raise ValueError("env_vars must be a dictionary")
+        
+        # Validate all values are strings
+        for key, value in env_vars.items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                raise ValueError(f"env_vars must contain only string key-value pairs, got {type(key).__name__}:{type(value).__name__}")
+        
+        resp = self._request("POST", "/session/env", json_body={"envVars": env_vars})
+        if not resp.ok:
+            error_msg = f"Failed to set environment variables for session '{self.session_id}'"
+            try:
+                error_detail = resp.text
+            except:
+                error_detail = None
+            raise SandboxError(
+                error_msg,
+                status_code=resp.status_code,
+                response_text=error_detail
+            )
 
 
 class Sandbox:
@@ -541,28 +596,26 @@ class Sandbox:
             )
         
         result = resp.json()
-        created_session_id = result.get('sessionId') or session_id
+        # Server returns {data: {sessionId: ...}, message, code}
+        data = result.get('data', result) if isinstance(result, dict) and 'data' in result else result
+        created_session_id = data.get('sessionId') or session_id
         if not created_session_id:
             raise SandboxError("Server did not return sessionId")
         
         return ExecutionSession(created_session_id, self)
 
-    def _get_session(self, session_id: str) -> ExecutionSession:
-        """Internal method to retrieve an existing session by ID."""
-        resp = self._request("GET", "/session", params={"id": session_id})
-        if not resp.ok:
-            error_msg = f"Failed to get session '{session_id}'"
-            try:
-                error_detail = resp.text
-            except:
-                error_detail = None
-            raise SandboxError(
-                error_msg,
-                status_code=resp.status_code,
-                response_text=error_detail
-            )
-        
-        return ExecutionSession(session_id, self)
+    # def _get_session(self, session_id: str) -> ExecutionSession:
+    #     """Internal method to retrieve an existing session by ID."""
+    #     # Server doesn't have a GET /session endpoint, but sessions are auto-created
+    #     # So we can just return the session - it will be created on first use
+    #     # Alternatively, try to create it and handle "already exists" error
+    #     try:
+    #         return self._create_session(session_id=session_id)
+    #     except SandboxError as e:
+    #         # If session already exists (409), return the session
+    #         if e.status_code == 409:
+    #             return ExecutionSession(session_id, self)
+    #         raise
 
     def create_or_get_session(
         self,
@@ -594,12 +647,11 @@ class Sandbox:
             )
         """
         try:
-            print("get session: server auto-creates, so _get_session should succeed if it exists")
-            return self._get_session(session_id)
+            print("create session")
+            return self._create_session(session_id=session_id, env=env, cwd=cwd)
+
         except SandboxError as e:
-            if e.status_code == 404:
-                print("create session")
-                return self._create_session(session_id=session_id, env=env, cwd=cwd)
+
             raise
 
     def delete_session(self, session_id: str) -> Dict[str, Any]:
@@ -623,7 +675,8 @@ class Sandbox:
         if session_id == "default":
             raise SandboxError("Cannot delete default session. Use destroy() to terminate the sandbox.")
         
-        resp = self._request("DELETE", "/session", json_body={"sessionId": session_id})
+        # Server expects session_id as query parameter for DELETE
+        resp = self._request("DELETE", "/session", params={"session_id": session_id})
         if not resp.ok:
             error_msg = f"Failed to delete session '{session_id}'"
             try:
@@ -635,8 +688,9 @@ class Sandbox:
                 status_code=resp.status_code,
                 response_text=error_detail
             )
-        
-        return resp.json()
+        result = resp.json()
+        # Server returns {data: {...}, message, code}
+        return result.get('data', result) if isinstance(result, dict) and 'data' in result else result
 
     def destroy_all_sessions(self, continue_on_error: bool = False) -> Dict[str, Any]:
         """
@@ -800,14 +854,22 @@ class SandboxManager:
         """
         Create (or ensure) a sandbox.
         
+        If the sandbox already exists in the local cache, returns it directly.
+        Otherwise, creates it on the server and caches it.
+        
         Returns a Sandbox instance on success.
         Raises SandboxError if the operation fails.
         
         Example:
-            sandbox = manager.create_sandbox("my-id")
+            sandbox = manager.create_or_get_sandbox("my-id")
             sandbox.write("/path/to/file", "content")
         """
-        resp = self._request("POST", "/sandbox", json_body={"sandboxId": sandbox_id, "options": options})
+        # Check if sandbox already exists in local cache
+        # if sandbox_id in self._sandboxes:
+        #     return self._sandboxes[sandbox_id]
+        
+        # Server uses /lifecycle endpoint for sandbox creation 备注: 服务端创建sandbox 若有缓存直接返回执行命令
+        resp = self._request("POST", "/lifecycle", json_body={"options": options}, sandbox_id=sandbox_id)
         if not resp.ok:
             error_msg = f"Failed to create sandbox '{sandbox_id}'"
             try:
@@ -825,9 +887,17 @@ class SandboxManager:
         """
         Destroy a sandbox by id.
         
+        If the sandbox is not in the local cache, returns immediately.
+        Otherwise, destroys it on the server and removes it from cache.
+        
         Raises SandboxError if the operation fails.
         """
-        resp = self._request("DELETE", "/sandbox", params={"sandbox_id": sandbox_id}, sandbox_id=sandbox_id)
+        # # Check if sandbox exists in local cache TODO：若客户端断开链接，服务端的sandbox就一直删不了了。。。。
+        # if sandbox_id not in self._sandboxes:
+        #     return
+        
+        # Server uses /lifecycle endpoint for sandbox destruction
+        resp = self._request("DELETE", "/lifecycle", sandbox_id=sandbox_id)
         if not resp.ok:
             error_msg = f"Failed to destroy sandbox '{sandbox_id}'"
             try:
