@@ -7,6 +7,28 @@ for the Cloudflare Sandbox server.
 
 Usage:
     python example.py
+
+Bucket Operations Testing:
+    To test bucket mounting operations, set the following environment variables:
+    
+    Required:
+    - BUCKET_NAME: Your bucket name
+    - BUCKET_ENDPOINT: Your bucket endpoint (e.g., https://<account-id>.r2.cloudflarestorage.com)
+    
+    Optional (if not set in Worker environment):
+    - AWS_ACCESS_KEY_ID: Your access key
+    - AWS_SECRET_ACCESS_KEY: Your secret key
+    
+    Example:
+        export BUCKET_NAME="my-bucket"
+        export BUCKET_ENDPOINT="https://abc123.r2.cloudflarestorage.com"
+        export AWS_ACCESS_KEY_ID="your-key"
+        export AWS_SECRET_ACCESS_KEY="your-secret"
+        python example.py
+    
+    Note: If AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are set in the Worker
+    environment (via wrangler secret put), you don't need to set them as local
+    environment variables. The Worker will automatically pass them to the sandbox.
 """
 
 import os
@@ -20,6 +42,31 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 project_root = os.path.dirname(parent_dir)
 sys.path.insert(0, project_root)
+
+# Load .env file if available
+try:
+    from dotenv import load_dotenv
+    # Try to load .env from current directory (client directory)
+    env_path = os.path.join(current_dir, ".env")
+    if os.path.exists(env_path):
+        load_dotenv(env_path)
+        print(f"[INFO] Loaded .env file from: {env_path}")
+    else:
+        # Try parent directory
+        env_path = os.path.join(parent_dir, ".env")
+        if os.path.exists(env_path):
+            load_dotenv(env_path)
+            print(f"[INFO] Loaded .env file from: {env_path}")
+        else:
+            # Try project root
+            env_path = os.path.join(project_root, ".env")
+            if os.path.exists(env_path):
+                load_dotenv(env_path)
+                print(f"[INFO] Loaded .env file from: {env_path}")
+except ImportError:
+    # python-dotenv not installed, skip loading .env file
+    print("not install")
+    pass
 
 try:
     from artifact_sandbox.client.client import SandboxManager, SandboxError, Sandbox
@@ -487,68 +534,223 @@ def test_error_handling(manager: SandboxManager, sandbox: Sandbox):
 
 
 def test_bucket_operations(sandbox: Sandbox):
-    """Test bucket mounting operations (requires configuration)."""
+    """Test bucket mounting operations."""
     print_section("6. Bucket Operations Tests")
-    
-    # Note: These tests require actual bucket configuration
-    # They are included as examples but will likely fail without proper setup
-    
-    # Test 6.1: Mount bucket (example - requires configuration)
-    print_test("6.1 Mount Bucket (Example - Requires Configuration)")
+
+    # Configuration: Set these environment variables or provide credentials in options
+    # For testing, you can set these via Worker secrets or environment variables
+    # Worker will auto-detect AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY if set
+
+    # Test 6.1: Mount bucket with explicit credentials
+    print_test("6.1 Mount Bucket with Explicit Credentials")
     print("  Note: This test requires valid bucket credentials and endpoint.")
-    print("  Uncomment and configure the following code to test:")
-    print("""
+    print("  Configure the following variables or set them as Worker environment variables:")
+    print("  - BUCKET_NAME: Your bucket name")
+    print("  - BUCKET_ENDPOINT: Your bucket endpoint (e.g., https://<account-id>.r2.cloudflarestorage.com)")
+    print("  - AWS_ACCESS_KEY_ID: Your access key (optional if set in Worker env)")
+    print("  - AWS_SECRET_ACCESS_KEY: Your secret key (optional if set in Worker env)")
+    print("  - CLOUDFLARE_ACCOUNT_ID: For R2, can be set in Worker env to auto-construct endpoint")
+
+    bucket_name = os.environ.get("BUCKET_NAME", "")
+    bucket_endpoint = os.environ.get("BUCKET_ENDPOINT", "")
+    access_key = os.environ.get("AWS_ACCESS_KEY_ID", "")
+    secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY", "")
+
+    if not bucket_name or not bucket_endpoint:
+        print("  ⚠ Skipping: BUCKET_NAME or BUCKET_ENDPOINT not set")
+        print("  To test, set environment variables:")
+        print("    export BUCKET_NAME='your-bucket-name'")
+        print("    export BUCKET_ENDPOINT='https://your-endpoint.com'")
+        if not access_key or not secret_key:
+            print("    export AWS_ACCESS_KEY_ID='your-key'")
+            print("    export AWS_SECRET_ACCESS_KEY='your-secret'")
+        return
+
+    mount_path = "/mnt/bucket"
     try:
+        # Build bucket options
+        # Provider is auto-detected from endpoint, but can be explicitly set:
+        # - "r2" for Cloudflare R2
+        # - "s3" for AWS S3 or S3-compatible storage
+        # - "gcs" for Google Cloud Storage
         bucket_options = {
-            "endpoint": "https://your-bucket-endpoint.com",
-            "provider": "s3",  # or "r2", "gcs"
-            "credentials": {
-                "accessKeyId": "your-access-key",
-                "secretAccessKey": "your-secret-key"
-            },
+            "endpoint": bucket_endpoint,
+            "provider": "r2" if "r2.cloudflarestorage.com" in bucket_endpoint else "s3",
             "readOnly": False
         }
-        result = sandbox.mount_bucket("my-bucket", "/mnt/bucket", bucket_options)
-        print("✓ Bucket mounted")
+        
+        # Only add credentials if explicitly provided (otherwise use Worker env vars)
+        if access_key and secret_key:
+            bucket_options["credentials"] = {
+                "accessKeyId": access_key,
+                "secretAccessKey": secret_key
+            }
+            print(f"  Using explicit credentials")
+        else:
+            print(f"  Using Worker environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)")
+        
+        result = sandbox.mount_bucket(bucket_name, mount_path, bucket_options)
+        print("✓ Bucket mounted successfully")
         print_result(result)
     except SandboxError as e:
         print(f"✗ Failed to mount bucket: {e}")
-    """)
+        print(f"  Status code: {e.status_code}")
+        if e.response_text:
+            print(f"  Response: {e.response_text[:200]}")
+        return
     
-    # Test 6.2: Unmount bucket (example)
-    print_test("6.2 Unmount Bucket (Example - Requires Configuration)")
-    print("  Note: This test requires a previously mounted bucket.")
-    print("  Uncomment and configure the following code to test:")
-    print("""
+    # Test 6.2: List files in mounted bucket
+    print_test("6.2 List Files in Mounted Bucket")
     try:
-        result = sandbox.unmount_bucket("/mnt/bucket")
-        print("✓ Bucket unmounted")
+        result = sandbox.run(f"ls -la {mount_path}")
+        print("✓ Listed files in mounted bucket")
         print_result(result)
     except SandboxError as e:
-        print(f"✗ Failed to unmount bucket: {e}")
-    """)
+        print(f"✗ Failed to list files: {e}")
     
-    # Test 6.3: Mount bucket in session (example)
-    print_test("6.3 Mount Bucket in Session (Example - Requires Configuration)")
-    print("  Note: This test requires valid bucket credentials.")
-    print("  Uncomment and configure the following code to test:")
-    print("""
+    # Test 6.3: Read file from bucket (if exists)
+    print_test("6.3 Read File from Bucket")
     try:
-        session = sandbox.create_or_get_session("bucket-session")
-        bucket_options = {
-            "endpoint": "https://your-bucket-endpoint.com",
-            "provider": "s3",
-            "credentials": {
-                "accessKeyId": "your-access-key",
-                "secretAccessKey": "your-secret-key"
-            }
+        # Try to find a file in the bucket
+        result = sandbox.run(f"find {mount_path} -type f -name '*.txt' -o -name '*.json' | head -1")
+        if result.get('output', '').strip():
+            test_file = result['output'].strip()
+            content = sandbox.read(test_file)
+            print(f"✓ Read file from bucket: {test_file}")
+            print_result({"file": test_file, "content_preview": content[:200] if len(content) > 200 else content})
+        else:
+            print("  ℹ No text/json files found in bucket to read")
+    except SandboxError as e:
+        print(f"✗ Failed to read file: {e}")
+    
+    # Test 6.4: Write file to bucket
+    print_test("6.4 Write File to Bucket")
+    test_bucket_file = f"{mount_path}/test_upload_{int(time.time())}.txt"
+    test_content = f"Test file written at {time.strftime('%Y-%m-%d %H:%M:%S')}\nThis is a test file uploaded to the bucket."
+    try:
+        sandbox.write(test_bucket_file, test_content)
+        print(f"✓ File written to bucket: {test_bucket_file}")
+        
+        # Verify by reading it back
+        read_back = sandbox.read(test_bucket_file)
+        assert read_back == test_content, "Content mismatch!"
+        print("✓ Verified: File content matches")
+    except SandboxError as e:
+        print(f"✗ Failed to write file to bucket: {e}")
+    except AssertionError as e:
+        print(f"✗ Content verification failed: {e}")
+    
+    # Test 6.5: Mount bucket in session
+    print_test("6.5 Mount Bucket in Session")
+    session_mount_path = "/mnt/session-bucket"
+    try:
+        session_id = f"bucket-session-{int(time.time())}"
+        session = sandbox.create_or_get_session(session_id)
+        
+        session_bucket_options = {
+            "endpoint": bucket_endpoint,
+            "provider": "r2" if "r2.cloudflarestorage.com" in bucket_endpoint else "s3",
+            "readOnly": False
         }
-        result = session.mount_bucket("my-bucket", "/mnt/session-bucket", bucket_options)
-        print("✓ Bucket mounted in session")
+        
+        if access_key and secret_key:
+            session_bucket_options["credentials"] = {
+                "accessKeyId": access_key,
+                "secretAccessKey": secret_key
+            }
+        
+        result = session.mount_bucket(bucket_name, session_mount_path, session_bucket_options)
+        print(f"✓ Bucket mounted in session: {session_id}")
         print_result(result)
+        
+        # Test file operation in session
+        session_test_file = f"{session_mount_path}/session_test_{int(time.time())}.txt"
+        session.write(session_test_file, "Content from session")
+        print(f"✓ File written in session bucket: {session_test_file}")
     except SandboxError as e:
         print(f"✗ Failed to mount bucket in session: {e}")
-    """)
+    
+    # Test 6.6: Mount bucket as read-only
+    print_test("6.6 Mount Bucket as Read-Only")
+    read_only_mount_path = "/mnt/bucket-readonly"
+    try:
+        read_only_options = {
+            "endpoint": bucket_endpoint,
+            "provider": "r2" if "r2.cloudflarestorage.com" in bucket_endpoint else "s3",
+            "readOnly": True
+        }
+        
+        if access_key and secret_key:
+            read_only_options["credentials"] = {
+                "accessKeyId": access_key,
+                "secretAccessKey": secret_key
+            }
+        
+        result = sandbox.mount_bucket(bucket_name, read_only_mount_path, read_only_options)
+        print("✓ Bucket mounted as read-only")
+        print_result(result)
+        
+        # Try to write (should work, but may fail depending on bucket permissions)
+        try:
+            test_ro_file = f"{read_only_mount_path}/readonly_test.txt"
+            sandbox.write(test_ro_file, "Test write to read-only mount")
+            print("  ℹ Write succeeded (bucket may allow writes despite readOnly flag)")
+        except SandboxError:
+            print("  ℹ Write failed as expected for read-only mount")
+    except SandboxError as e:
+        print(f"✗ Failed to mount bucket as read-only: {e}")
+    
+    # Test 6.7: Unmount bucket
+    print_test("6.7 Unmount Bucket")
+    try:
+        result = sandbox.unmount_bucket(mount_path)
+        print(f"✓ Bucket unmounted: {mount_path}")
+        print_result(result)
+        
+        # Verify unmount by trying to access the path
+        try:
+            sandbox.run(f"ls {mount_path}")
+            print("  ⚠ Warning: Mount path still accessible after unmount")
+        except SandboxError:
+            print("  ✓ Verified: Mount path no longer accessible")
+    except SandboxError as e:
+        print(f"✗ Failed to unmount bucket: {e}")
+    
+    # Test 6.8: Error handling - Invalid endpoint
+    print_test("6.8 Error Handling - Invalid Endpoint")
+    try:
+        invalid_options = {
+            "endpoint": "https://invalid-endpoint.example.com",
+            "provider": "s3",
+            "credentials": {
+                "accessKeyId": "test-key",
+                "secretAccessKey": "test-secret"
+            }
+        }
+        sandbox.mount_bucket("test-bucket", "/mnt/invalid", invalid_options)
+        print("✗ Should have raised an error for invalid endpoint!")
+    except SandboxError as e:
+        print(f"✓ Correctly raised error for invalid endpoint: {e.status_code} - {str(e)[:100]}")
+    
+    # Test 6.9: Error handling - Missing endpoint
+    print_test("6.9 Error Handling - Missing Endpoint")
+    try:
+        invalid_options = {
+            "provider": "s3"
+            # Missing endpoint
+        }
+        sandbox.mount_bucket("test-bucket", "/mnt/missing-endpoint", invalid_options)
+        print("✗ Should have raised an error for missing endpoint!")
+    except SandboxError as e:
+        print(f"✓ Correctly raised error for missing endpoint: {e.status_code} - {str(e)[:100]}")
+    
+    # Test 6.10: Error handling - Unmount non-existent mount
+    print_test("6.10 Error Handling - Unmount Non-existent Mount")
+    try:
+        sandbox.unmount_bucket("/mnt/non-existent-mount")
+        print("✗ Should have raised an error for non-existent mount!")
+    except SandboxError as e:
+        print(f"✓ Correctly raised error for non-existent mount: {e.status_code} - {str(e)[:100]}")
 
 
 def test_advanced_scenarios(sandbox: Sandbox):
@@ -657,9 +859,21 @@ def main():
     print("=" * 80)
     
     # Initialize manager
-    base_url = os.environ.get("SANDBOX_BASE_URL", "http://localhost:8787")
-    manager = SandboxManager(base_url=base_url)
+    base_url = "https://server.435669237.workers.dev"#os.environ.get("SANDBOX_BASE_URL", "http://localhost:8787")
+    # Set timeout to 60 seconds for long-running operations
+    timeout = int(os.environ.get("SANDBOX_TIMEOUT", "60"))
+    
+    # Check if proxy is detected
+    from client import detect_clash_proxy
+    detected_proxy = detect_clash_proxy()
+    
+    manager = SandboxManager(base_url=base_url, timeout=timeout, auto_detect_proxy=True)
     print(f"\nUsing base URL: {base_url}")
+    print(f"Request timeout: {timeout} seconds")
+    if manager.session.proxies:
+        print(f"Proxy configured: {manager.session.proxies}")
+    else:
+        print("No proxy configured (direct connection)")
     
     try:
         # Run all test suites
@@ -668,8 +882,8 @@ def main():
             # test_file_operations(sandbox)
             # test_command_execution(sandbox)
             # test_session_management(sandbox)
-            test_error_handling(manager, sandbox)
-            # test_bucket_operations(sandbox)
+            # test_error_handling(manager, sandbox)
+            test_bucket_operations(sandbox)
             # test_advanced_scenarios(sandbox)
         
         print_section("Test Summary")
@@ -687,6 +901,19 @@ def main():
     
     except KeyboardInterrupt:
         print("\n\n[Interrupted] Tests interrupted by user.")
+    except SandboxError as e:
+        print(f"\n\n[SandboxError] {e}")
+        if e.status_code:
+            print(f"  Status code: {e.status_code}")
+        if e.response_text:
+            print(f"  Response: {e.response_text[:500]}")
+        print("\nTroubleshooting:")
+        print("  1. Run test_connection.py to diagnose network issues:")
+        print("     python test_connection.py")
+        print("  2. Check if the server is accessible via curl")
+        print("  3. Verify your network connection and proxy settings")
+        import traceback
+        traceback.print_exc()
     except Exception as e:
         print(f"\n\n[Error] Unexpected error: {e}")
         import traceback

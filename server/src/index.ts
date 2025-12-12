@@ -29,10 +29,77 @@ export { Sandbox } from '@cloudflare/sandbox';
 // Declare Worker bindings to enable TypeScript hints
 type Env = {
   Sandbox: DurableObjectNamespace;
+  // Optional: AWS credentials for bucket mounting (auto-detected by SDK)
+  // Set via wrangler secret put AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY
+  AWS_ACCESS_KEY_ID?: string;
+  AWS_SECRET_ACCESS_KEY?: string;
+  // Optional: Cloudflare Account ID for R2 endpoint construction
+  CLOUDFLARE_ACCOUNT_ID?: string;
 };
+
+// ANSI color codes for terminal output
+const COLORS = {
+  reset: '\x1b[0m',
+  bright: '\x1b[1m',
+  dim: '\x1b[2m',
+  green: '\x1b[32m',
+  yellow: '\x1b[33m',
+  blue: '\x1b[34m',
+  cyan: '\x1b[36m',
+  red: '\x1b[31m',
+  magenta: '\x1b[35m',
+  gray: '\x1b[90m',
+};
+
+// Flag to track if environment variables have been logged (module-level, resets on cold start)
+let envLogged = false;
+
+/**
+ * Log environment variables on startup (first request)
+ * This helps debug configuration issues, especially for bucket mounting credentials
+ */
+function logEnvironmentVariables(env: Env): void {
+  if (envLogged) return; // Only log once per worker instance
+  
+  console.log(`\n${COLORS.cyan}${COLORS.bright}╔════════════════════════════════════════════════════════════╗${COLORS.reset}`);
+  console.log(`${COLORS.cyan}${COLORS.bright}║${COLORS.reset}  ${COLORS.bright}🚀 Worker Environment Variables${COLORS.reset}                      ${COLORS.cyan}${COLORS.bright}║${COLORS.reset}`);
+  console.log(`${COLORS.cyan}${COLORS.bright}╚════════════════════════════════════════════════════════════╝${COLORS.reset}\n`);
+  
+  // Sandbox DurableObjectNamespace
+  const sandboxStatus = env.Sandbox 
+    ? `${COLORS.green}✓ Available${COLORS.reset}`
+    : `${COLORS.red}✗ Missing${COLORS.reset}`;
+  console.log(`  ${COLORS.cyan}📦${COLORS.reset} Sandbox DurableObjectNamespace: ${sandboxStatus}`);
+  
+  // AWS credentials status (without exposing actual values)
+  const awsKeyStatus = env.AWS_ACCESS_KEY_ID
+    ? `${COLORS.green}✓ Set${COLORS.reset} ${COLORS.dim}(${env.AWS_ACCESS_KEY_ID.substring(0, 4)}...)${COLORS.reset}`
+    : `${COLORS.yellow}✗ Not set${COLORS.reset}`;
+  console.log(`  ${COLORS.blue}🔑${COLORS.reset} AWS_ACCESS_KEY_ID: ${awsKeyStatus}`);
+  
+  const awsSecretStatus = env.AWS_SECRET_ACCESS_KEY
+    ? `${COLORS.green}✓ Set${COLORS.reset} ${COLORS.dim}(***hidden***)${COLORS.reset}`
+    : `${COLORS.yellow}✗ Not set${COLORS.reset}`;
+  console.log(`  ${COLORS.blue}🔐${COLORS.reset} AWS_SECRET_ACCESS_KEY: ${awsSecretStatus}`);
+  
+  const cfAccountStatus = env.CLOUDFLARE_ACCOUNT_ID
+    ? `${COLORS.green}✓ Set${COLORS.reset} ${COLORS.dim}(${env.CLOUDFLARE_ACCOUNT_ID})${COLORS.reset}`
+    : `${COLORS.yellow}✗ Not set${COLORS.reset}`;
+  console.log(`  ${COLORS.magenta}☁️${COLORS.reset}  CLOUDFLARE_ACCOUNT_ID: ${cfAccountStatus}`);
+  
+  // Log all env keys (for debugging, but hide sensitive values)
+  const envKeys = Object.keys(env).filter(key => key !== 'AWS_SECRET_ACCESS_KEY');
+  console.log(`\n  ${COLORS.gray}📋 Available environment keys: ${COLORS.reset}${COLORS.dim}${envKeys.join(', ')}${COLORS.reset}`);
+  console.log(`\n${COLORS.cyan}${COLORS.dim}────────────────────────────────────────────────────────────────${COLORS.reset}\n`);
+  
+  envLogged = true;
+}
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    // Log environment variables on first request (startup)
+    logEnvironmentVariables(env);
+    
     const url = new URL(request.url);
     // console.log("-----😀env----")
     // console.log(env)
@@ -157,7 +224,8 @@ function respond(data: any, status = 200, message = 'ok') {
 
 async function handleLifecycle(request: Request, env: Env, sandboxId: string): Promise<Response> {
   const method = request.method.toUpperCase(); // 得到 POST 或 DELETE
-  console.log(method);
+  const methodIcon = method === 'POST' ? '🟢' : method === 'DELETE' ? '🔴' : '⚪';
+  console.log(`${COLORS.cyan}${methodIcon} ${COLORS.bright}${method}${COLORS.reset} ${COLORS.dim}/lifecycle${COLORS.reset} ${COLORS.gray}(sandbox: ${sandboxId.substring(0, 8)}...)${COLORS.reset}`);
   const body = await safeJson(request); // 尝试把请求体 JSON 化；如果体不是合法 JSON，返回 null。
 
   if (method === 'POST') {
@@ -167,10 +235,13 @@ async function handleLifecycle(request: Request, env: Env, sandboxId: string): P
 
     // 立刻执行一个极轻量命令，强制拉起容器并校验可用性
     try {
+      console.log(`${COLORS.cyan}  ⏳${COLORS.reset} Initializing sandbox container...`);
       const init = await sandbox.exec('echo ready');
+      console.log(`${COLORS.green}  ✓${COLORS.reset} Sandbox ${COLORS.bright}created and initialized${COLORS.reset} ${COLORS.dim}(sandbox: ${sandboxId.substring(0, 12)}...)${COLORS.reset}`);
       return respond({ sandboxId, created: true, initialized: true, init, options }, 200, 'ok');
     } catch (err: any) {
       const message = err?.message || 'init failed';
+      console.log(`${COLORS.red}  ✗${COLORS.reset} Sandbox initialization ${COLORS.red}failed${COLORS.reset}: ${COLORS.yellow}${message}${COLORS.reset}`);
       return respond({ sandboxId, created: false, initialized: false, error: message, options }, 500, message);
     }
   }
@@ -179,10 +250,13 @@ async function handleLifecycle(request: Request, env: Env, sandboxId: string): P
     // 无论怎么样都会返回 200 即使容器不存在已经被销毁 但是被销毁的肯定不存在了
     const sandbox = getSandbox(env.Sandbox, sandboxId);
     try {
+      console.log(`${COLORS.yellow}  ⏳${COLORS.reset} Destroying sandbox...`);
       await sandbox.destroy();
+      console.log(`${COLORS.green}  ✓${COLORS.reset} Sandbox ${COLORS.bright}destroyed${COLORS.reset} ${COLORS.dim}(sandbox: ${sandboxId.substring(0, 12)}...)${COLORS.reset}`);
       return respond({ sandboxId, destroyed: true }, 200, 'ok');
         } catch (err: any) {
       const message = err?.message || 'destroy failed';
+      console.log(`${COLORS.red}  ✗${COLORS.reset} Sandbox destruction ${COLORS.red}failed${COLORS.reset}: ${COLORS.yellow}${message}${COLORS.reset}`);
       return respond({ sandboxId, destroyed: false, error: message }, 500, message);
     }
   }
@@ -210,6 +284,10 @@ async function handleExec(request: Request, env: Env, sandboxId: string): Promis
   const execOptions = getExecOptions(body?.options ?? body);
   const sandbox = getSandbox(env.Sandbox, sandboxId);
 
+  // Log command execution
+  const commandPreview = command.length > 50 ? command.substring(0, 50) + '...' : command;
+  console.log(`${COLORS.cyan}⚡ ${COLORS.bright}POST${COLORS.reset} ${COLORS.dim}/exec${COLORS.reset} ${COLORS.gray}→${COLORS.reset} ${COLORS.yellow}${commandPreview}${COLORS.reset} ${COLORS.gray}(sandbox: ${sandboxId.substring(0, 8)}...)${COLORS.reset}`);
+
   try {
     const result = await sandbox.exec(command, execOptions);
     
@@ -218,6 +296,7 @@ async function handleExec(request: Request, env: Env, sandboxId: string): Promis
     // 2. 命令执行成功（零退出码）：result.success === true
     if (!result.success) {
       // 命令运行但失败（非零退出码）
+      console.log(`${COLORS.yellow}  ⚠${COLORS.reset} Command ${COLORS.yellow}failed${COLORS.reset} with exit code ${COLORS.red}${result.exitCode}${COLORS.reset}`);
       return respond(
         {
           sandboxId,
@@ -232,10 +311,12 @@ async function handleExec(request: Request, env: Env, sandboxId: string): Promis
     }
     
     // 命令执行成功
+    console.log(`${COLORS.green}  ✓${COLORS.reset} Command ${COLORS.green}executed successfully${COLORS.reset} ${COLORS.dim}(exit: ${result.exitCode})${COLORS.reset}`);
     return respond({ sandboxId, command, result }, 200, 'ok');
-  } catch (err: any) {
+        } catch (err: any) {
     // 命令无法启动（执行错误，抛出异常）
     const message = err?.message || 'exec failed';
+    console.log(`${COLORS.red}  ✗${COLORS.reset} Command execution ${COLORS.red}error${COLORS.reset}: ${COLORS.yellow}${message}${COLORS.reset}`);
     return respond(
       { sandboxId, command, error: message, type: 'execution_error' },
       500,
@@ -251,6 +332,9 @@ async function handleSession(
   url: URL
 ): Promise<Response> {
   const method = request.method.toUpperCase(); // POST / GET / DELETE
+  const methodIcon = method === 'POST' ? '🟢' : method === 'DELETE' ? '🔴' : '⚪';
+  console.log(`${COLORS.cyan}${methodIcon} ${COLORS.bright}${method}${COLORS.reset} ${COLORS.dim}/session${COLORS.reset} ${COLORS.gray}(sandbox: ${sandboxId.substring(0, 8)}...)${COLORS.reset}`);
+  
         const body = await safeJson(request);
   const sandbox = getSandbox(env.Sandbox, sandboxId);
 
@@ -273,19 +357,23 @@ async function handleSession(
 
 
     try {
+      console.log(`${COLORS.cyan}  ⏳${COLORS.reset} Creating session ${COLORS.bright}${resolvedIdFromInput}${COLORS.reset}...`);
       const session = await sandbox.createSession(mergedOptions); // sandbox 不存在就会创建
       const resolvedId = resolvedIdFromInput ?? (session as any)?.id ?? 'default';
+      console.log(`${COLORS.green}  ✓${COLORS.reset} Session ${COLORS.green}created${COLORS.reset} ${COLORS.dim}(session: ${resolvedId})${COLORS.reset}`);
       return respond({ sandboxId, sessionId: resolvedId, created: true, options: mergedOptions }, 200, 'ok');
         } catch (err: any) {
       const message = err?.message || 'create session failed';
       // 已存在的会话，返回 409 避免抛 500
       if (typeof message === 'string' && message.toLowerCase().includes('already exists')) {
+        console.log(`${COLORS.yellow}  ⚠${COLORS.reset} Session ${COLORS.yellow}already exists${COLORS.reset} ${COLORS.dim}(session: ${resolvedIdFromInput})${COLORS.reset}`);
         return respond(
           { sandboxId, sessionId: resolvedIdFromInput, created: false, exists: true, error: 'Session already exists' },
           409,
           'Session already exists'
         );
       }
+      console.log(`${COLORS.red}  ✗${COLORS.reset} Session creation ${COLORS.red}failed${COLORS.reset}: ${COLORS.yellow}${message}${COLORS.reset}`);
       return respond({ sandboxId, sessionId: resolvedIdFromInput, created: false, error: message }, 500, message);
     }
   }
@@ -299,18 +387,22 @@ async function handleSession(
       );
     }
     try {
+      console.log(`${COLORS.yellow}  ⏳${COLORS.reset} Deleting session ${COLORS.bright}${sessionId}${COLORS.reset}...`);
       const result = await sandbox.deleteSession(sessionId);
+      console.log(`${COLORS.green}  ✓${COLORS.reset} Session ${COLORS.green}deleted${COLORS.reset} ${COLORS.dim}(session: ${sessionId})${COLORS.reset}`);
       return respond({ sandboxId, ...result }, 200, 'ok');
-        } catch (err: any) {
+      } catch (err: any) {
       const message = err?.message || 'delete session failed';
       // 不存在的会话，返回 404 而不是 500
       if (typeof message === 'string' && message.toLowerCase().includes('not found')) {
+        console.log(`${COLORS.yellow}  ⚠${COLORS.reset} Session ${COLORS.yellow}not found${COLORS.reset} ${COLORS.dim}(session: ${sessionId})${COLORS.reset}`);
         return respond(
           { sandboxId, sessionId, deleted: false, exists: false, error: 'Session not found' },
           404,
           'Session not found'
         );
       }
+      console.log(`${COLORS.red}  ✗${COLORS.reset} Session deletion ${COLORS.red}failed${COLORS.reset}: ${COLORS.yellow}${message}${COLORS.reset}`);
       return respond({ sandboxId, sessionId, deleted: false, error: message }, 500, message);
     }
   }
@@ -330,13 +422,19 @@ async function handleSessionExec(
   }
 
         const body = await safeJson(request);
-  const command =
+        const command =
     typeof body?.command === 'string' && body.command.trim().length > 0 ? body.command.trim() : undefined;
   const sessionId =
     (typeof body?.sessionId === 'string' && body.sessionId) ||
     (typeof body?.session_id === 'string' && body.session_id) ||
     url.searchParams.get('session_id') ||
     undefined;
+  
+  // Log session command execution
+  if (command) {
+    const commandPreview = command.length > 40 ? command.substring(0, 40) + '...' : command;
+    console.log(`${COLORS.cyan}⚡ ${COLORS.bright}POST${COLORS.reset} ${COLORS.dim}/session/exec${COLORS.reset} ${COLORS.gray}→${COLORS.reset} ${COLORS.yellow}${commandPreview}${COLORS.reset} ${COLORS.gray}(session: ${sessionId || 'default'}, sandbox: ${sandboxId.substring(0, 8)}...)${COLORS.reset}`);
+  }
 
   if (!sessionId) {
     return respond(
@@ -358,7 +456,7 @@ async function handleSessionExec(
   const sandbox = getSandbox(env.Sandbox, sandboxId);
 
   try {
-    const session = await sandbox.getSession(sessionId);
+              const session = await sandbox.getSession(sessionId);
     const result = await session.exec(command, execOptions);
     
     // 区分两种情况：
@@ -366,6 +464,7 @@ async function handleSessionExec(
     // 2. 命令执行成功（零退出码）：result.success === true
     if (!result.success) {
       // 命令运行但失败（非零退出码）
+      console.log(`${COLORS.yellow}  ⚠${COLORS.reset} Session command ${COLORS.yellow}failed${COLORS.reset} with exit code ${COLORS.red}${result.exitCode}${COLORS.reset} ${COLORS.dim}(session: ${sessionId})${COLORS.reset}`);
       return respond(
         {
           sandboxId,
@@ -381,14 +480,17 @@ async function handleSessionExec(
     }
     
     // 命令执行成功
+    console.log(`${COLORS.green}  ✓${COLORS.reset} Session command ${COLORS.green}executed successfully${COLORS.reset} ${COLORS.dim}(exit: ${result.exitCode}, session: ${sessionId})${COLORS.reset}`);
     return respond({ sandboxId, sessionId, command, result }, 200, 'ok');
-  } catch (err: any) {
+      } catch (err: any) {
     const message = err?.message || 'session exec failed';
     // 会话不存在
     if (typeof message === 'string' && message.toLowerCase().includes('not found')) {
+      console.log(`${COLORS.yellow}  ⚠${COLORS.reset} Session ${COLORS.yellow}not found${COLORS.reset} ${COLORS.dim}(session: ${sessionId})${COLORS.reset}`);
       return respond({ sandboxId, sessionId, command, error: 'Session not found' }, 404, 'Session not found');
     }
     // 命令无法启动（执行错误，抛出异常）
+    console.log(`${COLORS.red}  ✗${COLORS.reset} Session command execution ${COLORS.red}error${COLORS.reset}: ${COLORS.yellow}${message}${COLORS.reset}`);
     return respond(
       { sandboxId, sessionId, command, error: message, type: 'execution_error' },
       500,
@@ -408,7 +510,7 @@ async function handleSessionEnv(
     return respond({ error: 'Use POST on /session/env' }, 405, 'Method Not Allowed');
   }
 
-  const body = await safeJson(request);
+        const body = await safeJson(request);
   const envVars = body?.envVars || body?.env_vars || body?.env;
   const sessionId =
     (typeof body?.sessionId === 'string' && body.sessionId) ||
@@ -429,7 +531,7 @@ async function handleSessionEnv(
   for (const [key, value] of Object.entries(envVars)) {
     if (typeof key === 'string' && typeof value === 'string') {
       envVarsRecord[key] = value;
-    } else {
+          } else {
       return respond(
         { error: 'envVars must be a record of string to string' },
         400,
@@ -438,6 +540,11 @@ async function handleSessionEnv(
     }
   }
 
+  const envVarKeys = Object.keys(envVarsRecord);
+  const envVarCount = envVarKeys.length;
+  const envVarPreview = envVarKeys.slice(0, 3).join(', ') + (envVarKeys.length > 3 ? '...' : '');
+  console.log(`${COLORS.cyan}🔧 ${COLORS.bright}POST${COLORS.reset} ${COLORS.dim}/session/env${COLORS.reset} ${COLORS.gray}→${COLORS.reset} ${COLORS.yellow}${envVarCount} vars${COLORS.reset} ${COLORS.dim}(${envVarPreview}, session: ${sessionId}, sandbox: ${sandboxId.substring(0, 8)}...)${COLORS.reset}`);
+
   const sandbox = getSandbox(env.Sandbox, sandboxId);
 
   try {
@@ -445,9 +552,10 @@ async function handleSessionEnv(
     let session;
     try {
       session = await sandbox.getSession(sessionId);
-    } catch {
+          } catch {
       // If session doesn't exist, create it with the env vars
       session = await sandbox.createSession({ id: sessionId, env: envVarsRecord });
+      console.log(`${COLORS.green}  ✓${COLORS.reset} Session ${COLORS.green}created${COLORS.reset} with ${COLORS.bright}${envVarCount}${COLORS.reset} env vars ${COLORS.dim}(session: ${sessionId})${COLORS.reset}`);
       return respond(
         { sandboxId, sessionId, envVars: envVarsRecord, set: true, sessionCreated: true },
         200,
@@ -457,9 +565,11 @@ async function handleSessionEnv(
 
     // Set environment variables on the existing session
     await session.setEnvVars(envVarsRecord);
+    console.log(`${COLORS.green}  ✓${COLORS.reset} Environment variables ${COLORS.green}set${COLORS.reset} ${COLORS.dim}(${envVarCount} vars, session: ${sessionId})${COLORS.reset}`);
     return respond({ sandboxId, sessionId, envVars: envVarsRecord, set: true }, 200, 'ok');
   } catch (err: any) {
     const message = err?.message || 'set env vars failed';
+    console.log(`${COLORS.red}  ✗${COLORS.reset} Setting environment variables ${COLORS.red}failed${COLORS.reset}: ${COLORS.yellow}${message}${COLORS.reset}`);
     return respond({ sandboxId, sessionId, error: message }, 500, message);
   }
 }
@@ -492,7 +602,7 @@ async function handleWriteFile(request: Request, env: Env, sandboxId: string): P
     return respond({ error: 'Use POST on /files/write' }, 405, 'Method Not Allowed');
   }
 
-  const body = await safeJson(request);
+        const body = await safeJson(request);
   const path = typeof body?.path === 'string' && body.path.trim().length > 0 ? body.path.trim() : undefined;
   const content = body?.content !== undefined ? body.content : undefined;
 
@@ -506,13 +616,20 @@ async function handleWriteFile(request: Request, env: Env, sandboxId: string): P
   const encoding = typeof body?.encoding === 'string' ? body.encoding : undefined;
   const options = encoding ? { encoding: encoding as 'base64' | 'utf-8' } : undefined;
 
+  // Calculate content size for logging
+  const contentSize = typeof content === 'string' ? content.length : (content ? JSON.stringify(content).length : 0);
+  const pathPreview = path.length > 50 ? path.substring(0, 50) + '...' : path;
+  console.log(`${COLORS.cyan}📝 ${COLORS.bright}POST${COLORS.reset} ${COLORS.dim}/files/write${COLORS.reset} ${COLORS.gray}→${COLORS.reset} ${COLORS.yellow}${pathPreview}${COLORS.reset} ${COLORS.dim}(${contentSize} chars${encoding ? `, ${encoding}` : ''}, sandbox: ${sandboxId.substring(0, 8)}...)${COLORS.reset}`);
+
   const sandbox = getSandbox(env.Sandbox, sandboxId);
 
   try {
     await sandbox.writeFile(path, content, options);
+    console.log(`${COLORS.green}  ✓${COLORS.reset} File ${COLORS.green}written successfully${COLORS.reset} ${COLORS.dim}(${contentSize} chars)${COLORS.reset}`);
     return respond({ sandboxId, path, written: true, encoding }, 200, 'ok');
-  } catch (err: any) {
+        } catch (err: any) {
     const message = err?.message || 'write file failed';
+    console.log(`${COLORS.red}  ✗${COLORS.reset} File write ${COLORS.red}failed${COLORS.reset}: ${COLORS.yellow}${message}${COLORS.reset}`);
     return respond({ sandboxId, path, written: false, error: message }, 500, message);
   }
 }
@@ -531,27 +648,35 @@ async function handleReadFile(request: Request, env: Env, sandboxId: string): Pr
     path = url.searchParams.get('path') || undefined;
     encoding = url.searchParams.get('encoding') || undefined;
   } else {
-    const body = await safeJson(request);
+        const body = await safeJson(request);
     path = typeof body?.path === 'string' && body.path.trim().length > 0 ? body.path.trim() : undefined;
     encoding = typeof body?.encoding === 'string' ? body.encoding : undefined;
   }
 
-  if (!path) {
+        if (!path) {
     return respond({ error: 'Missing path. Provide path in query (GET) or body (POST)' }, 400, 'Missing path');
   }
+
+  const pathPreview = path.length > 50 ? path.substring(0, 50) + '...' : path;
+  const methodIcon = method === 'GET' ? '📖' : '📝';
+  console.log(`${COLORS.cyan}${methodIcon} ${COLORS.bright}${method}${COLORS.reset} ${COLORS.dim}/files/read${COLORS.reset} ${COLORS.gray}→${COLORS.reset} ${COLORS.yellow}${pathPreview}${COLORS.reset} ${COLORS.dim}(${encoding || 'utf-8'}, sandbox: ${sandboxId.substring(0, 8)}...)${COLORS.reset}`);
 
   const options = encoding ? { encoding: encoding as 'base64' | 'utf-8' } : undefined;
   const sandbox = getSandbox(env.Sandbox, sandboxId);
 
   try {
     const file = await sandbox.readFile(path, options);
+    const contentSize = typeof file.content === 'string' ? file.content.length : (file.content ? JSON.stringify(file.content).length : 0);
+    console.log(`${COLORS.green}  ✓${COLORS.reset} File ${COLORS.green}read successfully${COLORS.reset} ${COLORS.dim}(${contentSize} chars)${COLORS.reset}`);
     return respond({ sandboxId, path, content: file.content, encoding }, 200, 'ok');
   } catch (err: any) {
     const message = err?.message || 'read file failed';
     // 文件不存在
     if (typeof message === 'string' && message.toLowerCase().includes('not found')) {
+      console.log(`${COLORS.yellow}  ⚠${COLORS.reset} File ${COLORS.yellow}not found${COLORS.reset} ${COLORS.dim}(${pathPreview})${COLORS.reset}`);
       return respond({ sandboxId, path, exists: false, error: 'File not found' }, 404, 'File not found');
     }
+    console.log(`${COLORS.red}  ✗${COLORS.reset} File read ${COLORS.red}failed${COLORS.reset}: ${COLORS.yellow}${message}${COLORS.reset}`);
     return respond({ sandboxId, path, error: message }, 500, message);
   }
 }
@@ -565,19 +690,24 @@ async function handleMkdir(request: Request, env: Env, sandboxId: string): Promi
   const body = await safeJson(request);
   const path = typeof body?.path === 'string' && body.path.trim().length > 0 ? body.path.trim() : undefined;
 
-  if (!path) {
+        if (!path) {
     return respond({ error: 'Missing path. Provide path in JSON body' }, 400, 'Missing path');
   }
 
   const recursive = typeof body?.recursive === 'boolean' ? body.recursive : false;
   const options = { recursive };
+  const pathPreview = path.length > 50 ? path.substring(0, 50) + '...' : path;
+  console.log(`${COLORS.cyan}📁 ${COLORS.bright}POST${COLORS.reset} ${COLORS.dim}/files/mkdir${COLORS.reset} ${COLORS.gray}→${COLORS.reset} ${COLORS.yellow}${pathPreview}${COLORS.reset} ${COLORS.dim}(${recursive ? 'recursive' : 'non-recursive'}, sandbox: ${sandboxId.substring(0, 8)}...)${COLORS.reset}`);
+
   const sandbox = getSandbox(env.Sandbox, sandboxId);
 
   try {
     await sandbox.mkdir(path, options);
+    console.log(`${COLORS.green}  ✓${COLORS.reset} Directory ${COLORS.green}created successfully${COLORS.reset} ${COLORS.dim}(${recursive ? 'recursive' : 'non-recursive'})${COLORS.reset}`);
     return respond({ sandboxId, path, created: true, recursive }, 200, 'ok');
   } catch (err: any) {
     const message = err?.message || 'mkdir failed';
+    console.log(`${COLORS.red}  ✗${COLORS.reset} Directory creation ${COLORS.red}failed${COLORS.reset}: ${COLORS.yellow}${message}${COLORS.reset}`);
     return respond({ sandboxId, path, created: false, error: message }, 500, message);
   }
 }
@@ -599,17 +729,24 @@ async function handleRenameFile(request: Request, env: Env, sandboxId: string): 
     return respond({ error: 'Missing newPath. Provide newPath in JSON body' }, 400, 'Missing newPath');
   }
 
+  const oldPathPreview = oldPath.length > 30 ? oldPath.substring(0, 30) + '...' : oldPath;
+  const newPathPreview = newPath.length > 30 ? newPath.substring(0, 30) + '...' : newPath;
+  console.log(`${COLORS.cyan}🔄 ${COLORS.bright}POST${COLORS.reset} ${COLORS.dim}/files/rename${COLORS.reset} ${COLORS.gray}→${COLORS.reset} ${COLORS.yellow}${oldPathPreview}${COLORS.reset} ${COLORS.gray}→${COLORS.reset} ${COLORS.yellow}${newPathPreview}${COLORS.reset} ${COLORS.dim}(sandbox: ${sandboxId.substring(0, 8)}...)${COLORS.reset}`);
+
   const sandbox = getSandbox(env.Sandbox, sandboxId);
 
   try {
     await sandbox.renameFile(oldPath, newPath);
+    console.log(`${COLORS.green}  ✓${COLORS.reset} File ${COLORS.green}renamed successfully${COLORS.reset}`);
     return respond({ sandboxId, oldPath, newPath, renamed: true }, 200, 'ok');
   } catch (err: any) {
     const message = err?.message || 'rename file failed';
     // 文件不存在
     if (typeof message === 'string' && message.toLowerCase().includes('not found')) {
+      console.log(`${COLORS.yellow}  ⚠${COLORS.reset} File ${COLORS.yellow}not found${COLORS.reset} ${COLORS.dim}(${oldPathPreview})${COLORS.reset}`);
       return respond({ sandboxId, oldPath, newPath, renamed: false, error: 'File not found' }, 404, 'File not found');
     }
+    console.log(`${COLORS.red}  ✗${COLORS.reset} File rename ${COLORS.red}failed${COLORS.reset}: ${COLORS.yellow}${message}${COLORS.reset}`);
     return respond({ sandboxId, oldPath, newPath, renamed: false, error: message }, 500, message);
   }
 }
@@ -620,7 +757,7 @@ async function handleMoveFile(request: Request, env: Env, sandboxId: string): Pr
     return respond({ error: 'Use POST on /files/move' }, 405, 'Method Not Allowed');
   }
 
-  const body = await safeJson(request);
+        const body = await safeJson(request);
   const sourcePath = typeof body?.sourcePath === 'string' && body.sourcePath.trim().length > 0 ? body.sourcePath.trim() : undefined;
   const destPath = typeof body?.destPath === 'string' && body.destPath.trim().length > 0 ? body.destPath.trim() : undefined;
 
@@ -631,17 +768,24 @@ async function handleMoveFile(request: Request, env: Env, sandboxId: string): Pr
     return respond({ error: 'Missing destPath. Provide destPath in JSON body' }, 400, 'Missing destPath');
   }
 
+  const sourcePreview = sourcePath.length > 30 ? sourcePath.substring(0, 30) + '...' : sourcePath;
+  const destPreview = destPath.length > 30 ? destPath.substring(0, 30) + '...' : destPath;
+  console.log(`${COLORS.cyan}📦 ${COLORS.bright}POST${COLORS.reset} ${COLORS.dim}/files/move${COLORS.reset} ${COLORS.gray}→${COLORS.reset} ${COLORS.yellow}${sourcePreview}${COLORS.reset} ${COLORS.gray}→${COLORS.reset} ${COLORS.yellow}${destPreview}${COLORS.reset} ${COLORS.dim}(sandbox: ${sandboxId.substring(0, 8)}...)${COLORS.reset}`);
+
   const sandbox = getSandbox(env.Sandbox, sandboxId);
 
   try {
     await sandbox.moveFile(sourcePath, destPath);
+    console.log(`${COLORS.green}  ✓${COLORS.reset} File ${COLORS.green}moved successfully${COLORS.reset}`);
     return respond({ sandboxId, sourcePath, destPath, moved: true }, 200, 'ok');
-  } catch (err: any) {
+        } catch (err: any) {
     const message = err?.message || 'move file failed';
     // 文件不存在
     if (typeof message === 'string' && message.toLowerCase().includes('not found')) {
+      console.log(`${COLORS.yellow}  ⚠${COLORS.reset} File ${COLORS.yellow}not found${COLORS.reset} ${COLORS.dim}(${sourcePreview})${COLORS.reset}`);
       return respond({ sandboxId, sourcePath, destPath, moved: false, error: 'File not found' }, 404, 'File not found');
     }
+    console.log(`${COLORS.red}  ✗${COLORS.reset} File move ${COLORS.red}failed${COLORS.reset}: ${COLORS.yellow}${message}${COLORS.reset}`);
     return respond({ sandboxId, sourcePath, destPath, moved: false, error: message }, 500, message);
   }
 }
@@ -662,21 +806,28 @@ async function handleDeleteFile(request: Request, env: Env, sandboxId: string): 
     path = typeof body?.path === 'string' && body.path.trim().length > 0 ? body.path.trim() : undefined;
   }
 
-  if (!path) {
+        if (!path) {
     return respond({ error: 'Missing path. Provide path in query (DELETE) or body (POST)' }, 400, 'Missing path');
   }
+
+  const pathPreview = path.length > 50 ? path.substring(0, 50) + '...' : path;
+  const methodIcon = method === 'DELETE' ? '🗑️' : '📝';
+  console.log(`${COLORS.cyan}${methodIcon} ${COLORS.bright}${method}${COLORS.reset} ${COLORS.dim}/files/delete${COLORS.reset} ${COLORS.gray}→${COLORS.reset} ${COLORS.yellow}${pathPreview}${COLORS.reset} ${COLORS.dim}(sandbox: ${sandboxId.substring(0, 8)}...)${COLORS.reset}`);
 
   const sandbox = getSandbox(env.Sandbox, sandboxId);
 
   try {
     await sandbox.deleteFile(path);
+    console.log(`${COLORS.green}  ✓${COLORS.reset} File ${COLORS.green}deleted successfully${COLORS.reset}`);
     return respond({ sandboxId, path, deleted: true }, 200, 'ok');
-  } catch (err: any) {
+        } catch (err: any) {
     const message = err?.message || 'delete file failed';
     // 文件不存在
     if (typeof message === 'string' && message.toLowerCase().includes('not found')) {
+      console.log(`${COLORS.yellow}  ⚠${COLORS.reset} File ${COLORS.yellow}not found${COLORS.reset} ${COLORS.dim}(${pathPreview})${COLORS.reset}`);
       return respond({ sandboxId, path, deleted: false, exists: false, error: 'File not found' }, 404, 'File not found');
     }
+    console.log(`${COLORS.red}  ✗${COLORS.reset} File deletion ${COLORS.red}failed${COLORS.reset}: ${COLORS.yellow}${message}${COLORS.reset}`);
     return respond({ sandboxId, path, deleted: false, error: message }, 500, message);
   }
 }
@@ -693,7 +844,7 @@ async function handleExists(request: Request, env: Env, sandboxId: string): Prom
   if (method === 'GET') {
     path = url.searchParams.get('path') || undefined;
   } else {
-    const body = await safeJson(request);
+        const body = await safeJson(request);
     path = typeof body?.path === 'string' && body.path.trim().length > 0 ? body.path.trim() : undefined;
   }
 
@@ -701,13 +852,20 @@ async function handleExists(request: Request, env: Env, sandboxId: string): Prom
     return respond({ error: 'Missing path. Provide path in query (GET) or body (POST)' }, 400, 'Missing path');
   }
 
+  const pathPreview = path.length > 50 ? path.substring(0, 50) + '...' : path;
+  const methodIcon = method === 'GET' ? '🔍' : '📝';
+  console.log(`${COLORS.cyan}${methodIcon} ${COLORS.bright}${method}${COLORS.reset} ${COLORS.dim}/files/exists${COLORS.reset} ${COLORS.gray}→${COLORS.reset} ${COLORS.yellow}${pathPreview}${COLORS.reset} ${COLORS.dim}(sandbox: ${sandboxId.substring(0, 8)}...)${COLORS.reset}`);
+
   const sandbox = getSandbox(env.Sandbox, sandboxId);
 
   try {
     const result = await sandbox.exists(path);
+    const existsStatus = result.exists ? `${COLORS.green}exists${COLORS.reset}` : `${COLORS.yellow}not found${COLORS.reset}`;
+    console.log(`${COLORS.green}  ✓${COLORS.reset} Path check completed: ${existsStatus}`);
     return respond({ sandboxId, path, exists: result.exists }, 200, 'ok');
-  } catch (err: any) {
+        } catch (err: any) {
     const message = err?.message || 'exists check failed';
+    console.log(`${COLORS.red}  ✗${COLORS.reset} Path existence check ${COLORS.red}failed${COLORS.reset}: ${COLORS.yellow}${message}${COLORS.reset}`);
     return respond({ sandboxId, path, error: message }, 500, message);
   }
 }
@@ -720,10 +878,10 @@ async function handleMountBucket(request: Request, env: Env, sandboxId: string):
     return respond({ error: 'Use POST on /mount-bucket' }, 405, 'Method Not Allowed');
   }
 
-  const body = await safeJson(request);
+        const body = await safeJson(request);
   const bucket = typeof body?.bucket === 'string' && body.bucket.trim().length > 0 ? body.bucket.trim() : undefined;
   const mountPath = typeof body?.mountPath === 'string' && body.mountPath.trim().length > 0 ? body.mountPath.trim() : undefined;
-  const sessionId = typeof body?.sessionId === 'string' ? body.sessionId : undefined;
+        const sessionId = typeof body?.sessionId === 'string' ? body.sessionId : undefined;
   const rawOptions = body?.options;
 
   if (!bucket) {
@@ -745,18 +903,50 @@ async function handleMountBucket(request: Request, env: Env, sandboxId: string):
         readOnly: typeof optionsObj.readOnly === 'boolean' ? optionsObj.readOnly : undefined,
         s3fsOptions: Array.isArray(optionsObj.s3fsOptions) ? optionsObj.s3fsOptions as string[] : undefined,
       };
-    } else {
+          } else {
       return respond({ error: 'options.endpoint is required for /mount-bucket' }, 400, 'Missing endpoint');
     }
   } else {
     return respond({ error: 'options.endpoint is required for /mount-bucket' }, 400, 'Missing options');
   }
 
+  const provider = mountOptions.provider || 'auto';
+  const readOnly = mountOptions.readOnly ? 'read-only' : 'read-write';
+  const targetInfo = sessionId ? `session: ${sessionId}` : 'sandbox';
+  console.log(`${COLORS.cyan}☁️  ${COLORS.bright}POST${COLORS.reset} ${COLORS.dim}/mount-bucket${COLORS.reset} ${COLORS.gray}→${COLORS.reset} ${COLORS.yellow}${bucket}${COLORS.reset} ${COLORS.gray}@${COLORS.reset} ${COLORS.yellow}${mountPath}${COLORS.reset} ${COLORS.dim}(${provider}, ${readOnly}, ${targetInfo}, sandbox: ${sandboxId.substring(0, 8)}...)${COLORS.reset}`);
+
   const sandbox = getSandbox(env.Sandbox, sandboxId);
 
   try {
+    // Get the target (sandbox or session) first
     const target = sessionId ? await sandbox.getSession(sessionId) : sandbox;
+    
+    // If credentials are not explicitly provided in options, try to use Worker env vars
+    // The SDK will auto-detect AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY from sandbox env vars
+    if (!mountOptions.credentials) {
+      const sandboxEnvVars: Record<string, string> = {};
+      
+      // Pass AWS credentials from Worker env to sandbox env for auto-detection
+      if (env.AWS_ACCESS_KEY_ID) {
+        sandboxEnvVars.AWS_ACCESS_KEY_ID = env.AWS_ACCESS_KEY_ID;
+      }
+      if (env.AWS_SECRET_ACCESS_KEY) {
+        sandboxEnvVars.AWS_SECRET_ACCESS_KEY = env.AWS_SECRET_ACCESS_KEY;
+      }
+      
+      // Optionally pass Cloudflare Account ID for R2 endpoint construction
+      if (env.CLOUDFLARE_ACCOUNT_ID) {
+        sandboxEnvVars.CLOUDFLARE_ACCOUNT_ID = env.CLOUDFLARE_ACCOUNT_ID;
+      }
+      
+      // Set env vars on the target before mounting
+      if (Object.keys(sandboxEnvVars).length > 0) {
+        await target.setEnvVars(sandboxEnvVars);
+      }
+    }
+
     await target.mountBucket(bucket, mountPath, mountOptions);
+    console.log(`${COLORS.green}  ✓${COLORS.reset} Bucket ${COLORS.green}mounted successfully${COLORS.reset} ${COLORS.dim}(${bucket} @ ${mountPath})${COLORS.reset}`);
     return respond({
       sandboxId,
       sessionId: sessionId || null,
@@ -776,6 +966,7 @@ async function handleMountBucket(request: Request, env: Env, sandboxId: string):
         (message.includes('Container') && (message.toLowerCase().includes('not found') || message.toLowerCase().includes('not initialized')))
       )
     ) {
+      console.log(`${COLORS.yellow}  ⚠${COLORS.reset} Sandbox or session ${COLORS.yellow}not found${COLORS.reset} ${COLORS.dim}(${sessionId || 'sandbox'})${COLORS.reset}`);
       return respond({ sandboxId, sessionId, bucket, mountPath, error: 'Sandbox or session not found' }, 404, 'Sandbox or session not found');
     }
 
@@ -788,9 +979,11 @@ async function handleMountBucket(request: Request, env: Env, sandboxId: string):
         message.includes('InvalidMountConfigError')
       )
     ) {
+      console.log(`${COLORS.yellow}  ⚠${COLORS.reset} Bucket mount ${COLORS.yellow}validation error${COLORS.reset}: ${COLORS.yellow}${message}${COLORS.reset}`);
       return respond({ sandboxId, sessionId, bucket, mountPath, error: message }, 400, message);
     }
 
+    console.log(`${COLORS.red}  ✗${COLORS.reset} Bucket mount ${COLORS.red}failed${COLORS.reset}: ${COLORS.yellow}${message}${COLORS.reset}`);
     return respond({ sandboxId, sessionId, bucket, mountPath, error: message }, 500, message);
   }
 }
@@ -820,11 +1013,16 @@ async function handleUnmountBucket(request: Request, env: Env, sandboxId: string
     return respond({ error: 'Missing mountPath. Provide mountPath in query (DELETE) or body (POST)' }, 400, 'Missing mountPath');
   }
 
+  const targetInfo = sessionId ? `session: ${sessionId}` : 'sandbox';
+  const methodIcon = method === 'DELETE' ? '🔴' : '📝';
+  console.log(`${COLORS.cyan}${methodIcon} ${COLORS.bright}${method}${COLORS.reset} ${COLORS.dim}/unmount-bucket${COLORS.reset} ${COLORS.gray}→${COLORS.reset} ${COLORS.yellow}${mountPath}${COLORS.reset} ${COLORS.dim}(${targetInfo}, sandbox: ${sandboxId.substring(0, 8)}...)${COLORS.reset}`);
+
   const sandbox = getSandbox(env.Sandbox, sandboxId);
 
   try {
     const target = sessionId ? await sandbox.getSession(sessionId) : sandbox;
     await target.unmountBucket(mountPath);
+    console.log(`${COLORS.green}  ✓${COLORS.reset} Bucket ${COLORS.green}unmounted successfully${COLORS.reset} ${COLORS.dim}(${mountPath})${COLORS.reset}`);
     return respond({
       sandboxId,
       sessionId: sessionId || null,
@@ -842,6 +1040,7 @@ async function handleUnmountBucket(request: Request, env: Env, sandboxId: string
         (message.includes('Container') && (message.toLowerCase().includes('not found') || message.toLowerCase().includes('not initialized')))
       )
     ) {
+      console.log(`${COLORS.yellow}  ⚠${COLORS.reset} Mount ${COLORS.yellow}not found${COLORS.reset} ${COLORS.dim}(${mountPath})${COLORS.reset}`);
       return respond({ sandboxId, sessionId, mountPath, error: 'Sandbox, session, or mount not found' }, 404, 'Not found');
     }
 
@@ -853,9 +1052,11 @@ async function handleUnmountBucket(request: Request, env: Env, sandboxId: string
         message.includes('InvalidMountConfigError')
       )
     ) {
+      console.log(`${COLORS.yellow}  ⚠${COLORS.reset} Bucket unmount ${COLORS.yellow}validation error${COLORS.reset}: ${COLORS.yellow}${message}${COLORS.reset}`);
       return respond({ sandboxId, sessionId, mountPath, error: message }, 400, message);
     }
 
+    console.log(`${COLORS.red}  ✗${COLORS.reset} Bucket unmount ${COLORS.red}failed${COLORS.reset}: ${COLORS.yellow}${message}${COLORS.reset}`);
     return respond({ sandboxId, sessionId, mountPath, error: message }, 500, message);
   }
 }

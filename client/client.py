@@ -1,16 +1,118 @@
 import base64
 import logging
 import os
+import socket
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import requests
 
 logger = logging.getLogger(__name__)
+current_dir = os.path.dirname(os.path.abspath(__file__))
+from dotenv import load_dotenv
+env_path = os.path.join(current_dir, ".env")
+if os.path.exists(env_path):
+        load_dotenv(env_path)
+        print(f"[INFO] Loaded .env file from: {env_path}")
 
 
 DEFAULT_BASE_URL = os.environ.get("SANDBOX_BASE_URL", "http://localhost:8787")
-# DEFAULT_BASE_URL="https://server.435669237.workers.dev"
+print(f"当前环境为:{DEFAULT_BASE_URL}")
+#TODO：明天看这里
+#https://dash.cloudflare.com/7ec35f2d4003f9c8aa6fb3707fca7016/r2/default/buckets/test/settings
+#https://claude.ai/chat/cd236071-8a53-4461-a6e9-f67244025f75
+#https://chat.deepseek.com/a/chat/s/31cce431-6c19-45d6-8792-ef19c121d324
+
+
+def detect_clash_proxy() -> Optional[Dict[str, str]]:
+    """
+    自动检测 Clash 代理是否可用。
+    
+    Clash 默认端口：
+    - HTTP 代理：7890
+    - SOCKS5 代理：7891
+    
+    Returns:
+        如果检测到可用的代理，返回代理配置字典，否则返回 None
+    """
+    # 常见的 Clash 代理端口
+    proxy_configs = [
+        {"http": "http://127.0.0.1:7890", "https": "http://127.0.0.1:7890"},  # HTTP 代理
+        {"http": "socks5://127.0.0.1:7891", "https": "socks5://127.0.0.1:7891"},  # SOCKS5 代理
+        {"http": "http://127.0.0.1:7897", "https": "http://127.0.0.1:7897"},  # 备用 HTTP 端口
+    ]
+    
+    # 首先检查环境变量中的代理设置
+    http_proxy = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
+    https_proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+    
+    if http_proxy or https_proxy:
+        proxy_config = {
+            "http": http_proxy or https_proxy,
+            "https": https_proxy or http_proxy
+        }
+        logger.info(f"Using proxy from environment variables: {proxy_config}")
+        return proxy_config
+    
+    # 检测 Clash 代理端口是否开放
+    for proxy_config in proxy_configs:
+        try:
+            # 尝试连接代理端口
+            proxy_url = proxy_config["http"].replace("http://", "").replace("socks5://", "").replace("https://", "")
+            host, port = proxy_url.split(":")
+            port = int(port)
+            
+            # 快速检查端口是否开放
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(1)
+            result = sock.connect_ex((host, port))
+            sock.close()
+            
+            if result == 0:  # 端口开放
+                # 进一步测试代理是否可用
+                try:
+                    test_session = requests.Session()
+                    test_session.proxies = proxy_config
+                    # 使用一个简单的测试请求验证代理
+                    test_response = test_session.get(
+                        "http://www.google.com",
+                        timeout=3,
+                        allow_redirects=False
+                    )
+                    if test_response.status_code in [200, 301, 302]:
+                        logger.info(f"Detected and verified Clash proxy: {proxy_config}")
+                        return proxy_config
+                except:
+                    # 如果测试失败，继续尝试下一个配置
+                    continue
+        except Exception as e:
+            logger.debug(f"Failed to check proxy {proxy_config}: {e}")
+            continue
+    
+    logger.info("No Clash proxy detected")
+    return None
+
+
+def configure_proxy(session: requests.Session, proxy: Optional[Dict[str, str]] = None) -> bool:
+    """
+    配置 requests session 的代理设置。
+    
+    Args:
+        session: requests.Session 实例
+        proxy: 代理配置字典，如果为 None 则自动检测
+        
+    Returns:
+        如果成功配置代理返回 True，否则返回 False
+    """
+    if proxy is None:
+        proxy = detect_clash_proxy()
+    
+    if proxy:
+        session.proxies.update(proxy)
+        logger.info(f"Proxy configured: {proxy}")
+        return True
+    
+    return False
 
 class SandboxError(Exception):
     """Exception raised when sandbox operations fail."""
@@ -415,7 +517,7 @@ class ExecutionSession:
                 error_msg,
                 status_code=resp.status_code,
                 response_text=error_detail
-            )
+        )
 
 
 class Sandbox:
@@ -647,8 +749,8 @@ class Sandbox:
             )
         """
         try:
-            print("create session")
-            return self._create_session(session_id=session_id, env=env, cwd=cwd)
+                print("create session")
+                return self._create_session(session_id=session_id, env=env, cwd=cwd)
 
         except SandboxError as e:
 
@@ -780,11 +882,34 @@ class Sandbox:
 
 class SandboxManager:
     """Manage CRUD operations for all sandboxes."""
-    def __init__(self,base_url: str = DEFAULT_BASE_URL):
+    def __init__(
+        self,
+        base_url: str = DEFAULT_BASE_URL,
+        timeout: int = 30,
+        proxy: Optional[Dict[str, str]] = None,
+        auto_detect_proxy: bool = True
+    ):
+        """
+        初始化 SandboxManager。
+        
+        Args:
+            base_url: 服务器基础 URL
+            timeout: 请求超时时间（秒）
+            proxy: 代理配置字典，格式: {"http": "http://127.0.0.1:7890", "https": "http://127.0.0.1:7890"}
+            auto_detect_proxy: 是否自动检测 Clash 代理（默认 True）
+        """
         # Cache sandbox_id -> Sandbox instance to reuse the same handle
         self._sandboxes: Dict[str, Sandbox] = {}
         self.base_url = base_url
+        self.timeout = timeout
         self.session = requests.Session()
+        
+        # 配置代理
+        if proxy:
+            self.session.proxies.update(proxy)
+            logger.info(f"Using provided proxy: {proxy}")
+        elif auto_detect_proxy:
+            configure_proxy(self.session)
 
 
     def _append_id(self, sandbox_id: str) -> Sandbox:
@@ -828,13 +953,61 @@ class SandboxManager:
             },
         )
 
-        resp = self.session.request(
-            method,
-            url,
-            params=params,
-            json=json_body,
-            stream=stream,
-            headers=self._headers(sandbox_id),
+        try:
+            resp = self.session.request(
+                method,
+                url,
+                params=params,
+                json=json_body,
+                stream=stream,
+                headers=self._headers(sandbox_id),
+                timeout=self.timeout,
+            )
+        except requests.exceptions.Timeout as e:
+            logger.error(
+                "[client][manager] request timeout",
+                extra={
+                    "sandboxId": sandbox_id,
+                    "method": method,
+                    "url": url,
+                    "timeout": self.timeout,
+                },
+            )
+            raise SandboxError(
+                f"Request to {url} timed out after {self.timeout} seconds. "
+                "This might be a network connectivity issue or the server is not responding.",
+                status_code=None,
+                response_text=str(e)
+            )
+        except requests.exceptions.ConnectionError as e:
+            logger.error(
+                "[client][manager] connection error",
+                extra={
+                    "sandboxId": sandbox_id,
+                    "method": method,
+                    "url": url,
+                },
+            )
+            raise SandboxError(
+                f"Failed to connect to {url}. "
+                "Please check your network connection and ensure the server is accessible. "
+                "If you're behind a proxy, configure it via environment variables (HTTP_PROXY/HTTPS_PROXY).",
+                status_code=None,
+                response_text=str(e)
+            )
+        except requests.exceptions.RequestException as e:
+            logger.error(
+                "[client][manager] request error",
+                extra={
+                    "sandboxId": sandbox_id,
+                    "method": method,
+                    "url": url,
+                },
+            )
+            raise SandboxError(
+                f"Request to {url} failed: {str(e)}",
+                status_code=None,
+                response_text=str(e)
         )
         logger.info(
             "[client][manager] response",

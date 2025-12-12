@@ -13,6 +13,8 @@
 	"observability": {
 		"enabled": true
 	},
+	"vars": {
+  },
 	/**
 	 * Smart Placement
 	 * Docs: https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
@@ -27,11 +29,28 @@
 	/**
 	 * Environment Variables
 	 * https://developers.cloudflare.com/workers/wrangler/configuration/#environment-variables
+	 * 
+	 * For bucket mounting, you can set AWS credentials as secrets:
+	 * - wrangler secret put AWS_ACCESS_KEY_ID
+	 * - wrangler secret put AWS_SECRET_ACCESS_KEY
+	 *
+	 * Or set them as environment variables (less secure, not recommended for production):
+	 "vars": {
+	 *   "AWS_ACCESS_KEY_ID": "your-access-key",
+	 *   "AWS_SECRET_ACCESS_KEY": "your-secret-key"
+	 * }
+	 * 
+	 * Optional: Cloudflare Account ID for R2 endpoint construction
+	 * "vars": { "CLOUDFLARE_ACCOUNT_ID": "your-account-id" }
 	 */
 	// "vars": { "MY_VARIABLE": "production_value" }
 	/**
 	 * Note: Use secrets to store sensitive data.
 	 * https://developers.cloudflare.com/workers/configuration/secrets/
+	 * 
+	 * To set secrets for bucket mounting:
+	 * wrangler secret put AWS_ACCESS_KEY_ID
+	 * wrangler secret put AWS_SECRET_ACCESS_KEY
 	 */
 	/**
 	 * Static Assets
@@ -48,7 +67,7 @@
 			"class_name": "Sandbox",
 			"image": "./Dockerfile",
 			"instance_type": "lite",
-			"max_instances": 1
+			"max_instances": 100
 		}
 	],
 	"durable_objects": {

@@ -1,0 +1,12 @@
+
+# Local scratch space (keep experimental files out of git)
+/lab/
+/other/
+
+# Common Python artifacts
+__pycache__/
+*.py[cod]
+*.swp
+.venv/
+.env
+.env.*
